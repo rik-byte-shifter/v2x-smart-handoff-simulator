@@ -81,6 +81,14 @@ This makes the simulator useful for demos, class presentations, and algorithm ex
   - urban canyon
   - intersection
 
+### Dynamic Safe-Placement System
+
+- Towers are placed through a safety filter that rejects points colliding with UI rectangles.
+- Protected regions currently include:
+  - right dashboard panel
+  - top-left help/controls panel
+- On scenario switch (or help panel toggle), tower coordinates are re-evaluated and snapped to the nearest valid point.
+
 ### Telemetry Pipeline
 
 - Every frame is logged in-memory with:
@@ -100,3 +108,15 @@ This makes the simulator useful for demos, class presentations, and algorithm ex
 - Matplotlib output (`outputs/performance_*.png`) includes:
   - RSS-over-time curves for all towers
   - connected-tower timeline (handoff sequence)
+
+### Side-by-Side A/B Evaluator
+
+- A/B mode runs both predictive policies on the same trajectory:
+  - A: velocity extrapolation
+  - B: Kalman-based forecast
+- It exports summary metrics to `outputs/ab_eval_*.csv`, including:
+  - handoff count
+  - ping-pong count
+  - average connected RSS
+  - outage time below threshold
+- It also generates `outputs/ab_eval_*.png` for visual comparison.

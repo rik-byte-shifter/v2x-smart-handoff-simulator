@@ -1,5 +1,6 @@
 import csv
 import math
+import random
 import sys
 import time
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ PREDICT_LOOKAHEAD_S = 0.8
 PREDICT_DT_S = 0.1
 
 OUTPUT_DIR = Path("outputs")
+OUTAGE_RSS_THRESHOLD_DBM = -95.0
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,7 @@ class V2XSmartHandoffSimulator:
         self.replay_index = 0
         self.replay_positions: List[Tuple[int, int]] = []
         self.replay_source: Optional[Path] = None
+        self.active_scenario = "baseline"
 
         OUTPUT_DIR.mkdir(exist_ok=True)
         self.apply_scenario("baseline")
@@ -176,10 +179,64 @@ class V2XSmartHandoffSimulator:
     def clamp_ue(self, x: int, y: int) -> Tuple[int, int]:
         return max(0, min(WIDTH - 1, x)), max(0, min(HEIGHT - 1, y))
 
+    def get_dashboard_rect(self) -> pygame.Rect:
+        return pygame.Rect(WIDTH - 430, 16, 414, HEIGHT - 32)
+
+    def get_help_rect(self) -> pygame.Rect:
+        lines = 9
+        h = 24 + lines * 19
+        return pygame.Rect(14, 14, 470, h)
+
+    def blocked_ui_rects(self) -> List[pygame.Rect]:
+        return [self.get_dashboard_rect(), self.get_help_rect()]
+
+    def is_safe_point(self, x: int, y: int, radius: int = 18) -> bool:
+        safe_rect = pygame.Rect(x - radius, y - radius, radius * 2, radius * 2)
+        for rect in self.blocked_ui_rects():
+            if safe_rect.colliderect(rect):
+                return False
+        return True
+
+    def snap_to_safe_point(self, x: int, y: int, radius: int = 18) -> Tuple[int, int]:
+        sx, sy = self.clamp_ue(x, y)
+        if self.is_safe_point(sx, sy, radius=radius):
+            return sx, sy
+        max_r = 420
+        step = 10
+        for r in range(step, max_r, step):
+            for _ in range(32):
+                theta = random.uniform(0, math.tau)
+                nx = int(sx + r * math.cos(theta))
+                ny = int(sy + r * math.sin(theta))
+                nx, ny = self.clamp_ue(nx, ny)
+                if self.is_safe_point(nx, ny, radius=radius):
+                    return nx, ny
+        return sx, sy
+
+    def place_towers_for_scenario(self, name: str) -> None:
+        old_current_name = self.current_tower.name if hasattr(self, "current_tower") else "TOWER_A"
+        old_candidate_name = self.candidate_tower.name if self.candidate_tower else None
+        templates = {
+            "baseline": [(160, 240), (820, 220), (340, HEIGHT - 170), (800, HEIGHT - 180)],
+            "urban_canyon": [(170, 170), (840, 170), (260, 640), (860, 620)],
+            "intersection": [(210, 140), (770, 140), (250, 610), (770, 610)],
+        }
+        selected = templates.get(name, templates["baseline"])
+        new_towers: List[Tower] = []
+        for idx, (x, y) in enumerate(selected):
+            sx, sy = self.snap_to_safe_point(x, y, radius=26)
+            new_towers.append(Tower(f"TOWER_{chr(ord('A') + idx)}", sx, sy, TOWER_COLORS[idx]))
+        self.towers = new_towers
+        tower_by_name = {tower.name: tower for tower in self.towers}
+        self.current_tower = tower_by_name.get(old_current_name, self.towers[0])
+        self.candidate_tower = tower_by_name.get(old_candidate_name) if old_candidate_name else None
+
     def apply_scenario(self, name: str) -> None:
+        self.active_scenario = name
+        self.place_towers_for_scenario(name)
         if name == "baseline":
             self.buildings = []
-            self.ue_pos = (WIDTH // 2, HEIGHT // 2)
+            self.ue_pos = self.snap_to_safe_point(WIDTH // 2, HEIGHT // 2, radius=14)
             self.prev_ue_pos = self.ue_pos
         elif name == "urban_canyon":
             self.buildings = [
@@ -187,7 +244,7 @@ class V2XSmartHandoffSimulator:
                 Building(640, 180, 130, 310),
                 Building(500, 560, 260, 120),
             ]
-            self.ue_pos = (220, 520)
+            self.ue_pos = self.snap_to_safe_point(220, 520, radius=14)
             self.prev_ue_pos = self.ue_pos
         elif name == "intersection":
             self.buildings = [
@@ -195,7 +252,7 @@ class V2XSmartHandoffSimulator:
                 Building(690, 280, 170, 120),
                 Building(550, 450, 160, 120),
             ]
-            self.ue_pos = (640, 680)
+            self.ue_pos = self.snap_to_safe_point(640, 680, radius=14)
             self.prev_ue_pos = self.ue_pos
         self.push_event(f"Scenario loaded: {name}")
 
@@ -237,6 +294,7 @@ class V2XSmartHandoffSimulator:
                     self.running = False
                 elif event.key == pygame.K_h:
                     self.show_help = not self.show_help
+                    self.place_towers_for_scenario(self.active_scenario)
                 elif event.key == pygame.K_c:
                     self.buildings.clear()
                     self.push_event("All buildings removed.")
@@ -260,6 +318,12 @@ class V2XSmartHandoffSimulator:
                         self.push_event("Chart generation skipped (need matplotlib + data).")
                 elif event.key == pygame.K_r:
                     self.toggle_replay()
+                elif event.key == pygame.K_e:
+                    result = self.run_ab_evaluation()
+                    if result:
+                        self.push_event(f"A/B evaluation done: {result}")
+                    else:
+                        self.push_event("A/B evaluation skipped (need telemetry/replay trajectory).")
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not self.replay_mode:
                 self.drag_building_start = event.pos
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1 and not self.replay_mode:
@@ -470,6 +534,157 @@ class V2XSmartHandoffSimulator:
         plt.close(fig)
         return chart_path
 
+    def trajectory_for_evaluation(self) -> List[Tuple[int, int]]:
+        if self.replay_positions:
+            return list(self.replay_positions)
+        if self.telemetry:
+            return [(int(float(r["ue_x"])), int(float(r["ue_y"]))) for r in self.telemetry]
+        return []
+
+    def evaluate_model(self, model: str, positions: List[Tuple[int, int]]) -> Dict[str, object]:
+        dt = 1.0 / FPS
+        hold_frames = max(1, int(HANDOFF_HOLD_S * FPS))
+        kalman = Kalman2D()
+
+        current_tower = self.towers[0]
+        candidate_tower: Optional[Tower] = None
+        candidate_frames = 0
+        handoff_count = 0
+        ping_pong = 0
+        outage_time = 0.0
+        total_rss = 0.0
+        history: List[str] = [current_tower.name]
+        series_t = []
+        series_conn = []
+        series_rss = []
+
+        prev_pos = positions[0]
+        for idx, pos in enumerate(positions):
+            vx = (pos[0] - prev_pos[0]) * METER_PER_PIXEL / dt
+            vy = (pos[1] - prev_pos[1]) * METER_PER_PIXEL / dt
+            vel = (vx, vy)
+            prev_pos = pos
+            kalman.update(float(pos[0]), float(pos[1]), dt)
+
+            measurements = {t: self.calculate_measurement(t, pos, vel) for t in self.towers}
+            strongest = max(self.towers, key=lambda t: measurements[t].rss_dbm)
+            current_rss = measurements[current_tower].rss_dbm
+            strongest_rss = measurements[strongest].rss_dbm
+
+            if model == "kalman":
+                px, py = kalman.predict(PREDICT_LOOKAHEAD_S)
+            else:
+                px = pos[0] + (vx / METER_PER_PIXEL) * PREDICT_LOOKAHEAD_S
+                py = pos[1] + (vy / METER_PER_PIXEL) * PREDICT_LOOKAHEAD_S
+            ppos = self.clamp_ue(int(px), int(py))
+            predicted_scores = {
+                t: self.calculate_measurement(t, ppos, vel).rss_dbm for t in self.towers
+            }
+            predicted_best = max(self.towers, key=lambda t: predicted_scores[t])
+            predictive_pressure = predicted_scores[predicted_best] - predicted_scores[current_tower] >= HANDOFF_MARGIN_DB
+
+            trigger_by_margin = strongest != current_tower and (strongest_rss - current_rss >= HANDOFF_MARGIN_DB)
+            trigger_predictive = predicted_best != current_tower and predictive_pressure
+            should_consider = trigger_by_margin or trigger_predictive
+            chosen_candidate = strongest if trigger_by_margin else predicted_best
+
+            if should_consider:
+                if candidate_tower != chosen_candidate:
+                    candidate_tower = chosen_candidate
+                    candidate_frames = 1
+                else:
+                    candidate_frames += 1
+                    if candidate_frames >= hold_frames:
+                        old = current_tower.name
+                        current_tower = chosen_candidate
+                        handoff_count += 1
+                        history.append(current_tower.name)
+                        if len(history) >= 3 and history[-3] == history[-1] and history[-2] != history[-1]:
+                            ping_pong += 1
+                        candidate_tower = None
+                        candidate_frames = 0
+                        _ = old
+            else:
+                candidate_tower = None
+                candidate_frames = 0
+
+            conn_rss = measurements[current_tower].rss_dbm
+            total_rss += conn_rss
+            if conn_rss < OUTAGE_RSS_THRESHOLD_DBM:
+                outage_time += dt
+            series_t.append(idx * dt)
+            series_conn.append(next(i for i, t in enumerate(self.towers) if t.name == current_tower.name))
+            series_rss.append(conn_rss)
+
+        n = max(1, len(positions))
+        return {
+            "model": model,
+            "samples": n,
+            "handoff_count": handoff_count,
+            "ping_pong_count": ping_pong,
+            "avg_connected_rss_dbm": round(total_rss / n, 3),
+            "outage_time_s": round(outage_time, 3),
+            "series_t": series_t,
+            "series_conn": series_conn,
+            "series_rss": series_rss,
+        }
+
+    def run_ab_evaluation(self) -> Optional[str]:
+        positions = self.trajectory_for_evaluation()
+        if len(positions) < 10:
+            return None
+        eval_velocity = self.evaluate_model("velocity", positions)
+        eval_kalman = self.evaluate_model("kalman", positions)
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_path = OUTPUT_DIR / f"ab_eval_{stamp}.csv"
+        fields = [
+            "model",
+            "samples",
+            "handoff_count",
+            "ping_pong_count",
+            "avg_connected_rss_dbm",
+            "outage_time_s",
+        ]
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            writer.writerow({k: eval_velocity[k] for k in fields})
+            writer.writerow({k: eval_kalman[k] for k in fields})
+
+        self.generate_ab_chart(eval_velocity, eval_kalman, stamp)
+        return csv_path.name
+
+    def generate_ab_chart(self, a: Dict[str, object], b: Dict[str, object], stamp: str) -> Optional[Path]:
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return None
+
+        chart_path = OUTPUT_DIR / f"ab_eval_{stamp}.png"
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+        axes[0].plot(a["series_t"], a["series_rss"], label="velocity connected RSS", linewidth=1.3)
+        axes[0].plot(b["series_t"], b["series_rss"], label="kalman connected RSS", linewidth=1.3)
+        axes[0].set_ylabel("Connected RSS (dBm)")
+        axes[0].set_title("A/B Predictor Comparison")
+        axes[0].grid(True, alpha=0.3)
+        axes[0].legend(loc="best")
+
+        axes[1].plot(a["series_t"], a["series_conn"], label="velocity tower index", linewidth=1.2)
+        axes[1].plot(b["series_t"], b["series_conn"], label="kalman tower index", linewidth=1.2)
+        axes[1].set_xlabel("Time (s)")
+        axes[1].set_ylabel("Connected tower index")
+        axes[1].grid(True, alpha=0.3)
+        axes[1].legend(loc="best")
+
+        fig.tight_layout()
+        fig.savefig(chart_path, dpi=150)
+        plt.close(fig)
+        return chart_path
+
     def draw_grid(self) -> None:
         self.screen.fill(CITY_BG)
         for x in range(0, WIDTH, 40):
@@ -548,6 +763,7 @@ class V2XSmartHandoffSimulator:
             "- X: export telemetry CSV",
             "- P: generate performance chart",
             "- R: toggle replay from latest CSV",
+            "- E: run side-by-side A/B evaluator",
             "- C: clear buildings | H: toggle help | ESC: quit",
         ]
         h = 24 + len(lines) * 19

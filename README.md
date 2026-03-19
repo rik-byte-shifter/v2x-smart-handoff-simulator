@@ -15,10 +15,12 @@ A professional real-time simulator that demonstrates V2X/6G mobility behavior in
 ## Enterprise Features
 
 - **Scenario presets** (`1/2/3`): baseline, urban canyon, and intersection topologies
+- **Dynamic safe-placement**: towers are auto-positioned away from UI overlays (dashboard/help)
 - **Telemetry export** (`X`): structured CSV with UE kinematics and per-tower metrics
 - **Replay mode** (`R`): replays UE trajectory from the latest exported telemetry CSV
 - **Performance charts** (`P`): auto-generates PNG analytics with RSS timeline and handoff timeline
 - **Predictive model switch** (`K`): compare velocity extrapolation vs. Kalman-based forecasting
+- **Side-by-side A/B evaluator** (`E`): compares velocity vs Kalman predictors and exports metrics/charts
 - **Professional dashboard**: live signal panel, connected tower state, mode indicators, and event log
 
 ## Architecture
@@ -42,6 +44,7 @@ See `docs/ARCHITECTURE.md` for details.
 - `X`: export telemetry CSV to `outputs/`
 - `P`: generate performance chart PNG to `outputs/`
 - `R`: replay UE trajectory from latest exported CSV
+- `E`: run A/B evaluator (velocity vs kalman)
 - `C`: clear all buildings
 - `H`: toggle help
 - `Esc`: exit
@@ -75,6 +78,9 @@ python src/main.py
 - Telemetry and chart outputs:
   - CSV: `outputs/telemetry_YYYYMMDD_HHMMSS.csv`
   - PNG: `outputs/performance_YYYYMMDD_HHMMSS.png`
+- A/B evaluator outputs:
+  - CSV: `outputs/ab_eval_YYYYMMDD_HHMMSS.csv`
+  - PNG: `outputs/ab_eval_YYYYMMDD_HHMMSS.png`
 
 ## Why This Is Unique
 
