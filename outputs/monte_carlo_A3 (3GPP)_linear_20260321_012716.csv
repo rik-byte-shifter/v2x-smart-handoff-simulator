@@ -1,0 +1,12 @@
+Metric,Value
+Algorithm,A3 (3GPP)
+Trajectory Pattern,linear
+Number of Trials,5
+Duration per Trial (s),5.0
+
+Metric,Mean,Std Dev,95% CI Low,95% CI High
+avg_aoi,0.211242,0.065032,0.120964,0.301521
+peak_aoi,0.794056,0.180453,0.543548,1.044564
+handoff_count,0.400000,0.800000,-0.710578,1.510578
+ping_pong_count,0.000000,0.000000,0.000000,0.000000
+outage_time_s,0.000000,0.000000,0.000000,0.000000

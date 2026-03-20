@@ -1,0 +1,12 @@
+Metric,Value
+Algorithm,Q-Learning
+Trajectory Pattern,linear
+Number of Trials,5
+Duration per Trial (s),5.0
+
+Metric,Mean,Std Dev,95% CI Low,95% CI High
+avg_aoi,0.299067,0.053942,0.224183,0.373951
+peak_aoi,1.181590,0.242946,0.844326,1.518853
+handoff_count,50.400000,6.945502,40.758097,60.041903
+ping_pong_count,11.600000,1.959592,8.879650,14.320350
+outage_time_s,0.000000,0.000000,0.000000,0.000000

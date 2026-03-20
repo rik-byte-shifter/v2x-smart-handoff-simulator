@@ -1,5 +1,6 @@
 import csv
 import math
+import os
 import random
 import sys
 import time
@@ -8,7 +9,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import pygame
+
+from config import CONFIG
 
 
 WIDTH = 1280
@@ -38,11 +42,29 @@ REFERENCE_DISTANCE_M = 1.0
 REFERENCE_LOSS_DB = 32.44
 TX_POWER_DBM = 30.0
 SHADOWING_DROP_DB = 20.0
+DYNAMIC_SHADOW_MEAN_DB = 14.0
+DYNAMIC_SHADOW_STD_DB = 5.5
+GHOST_NOISE_M = 1.8
 
 HANDOFF_MARGIN_DB = 5.0
 HANDOFF_HOLD_S = 0.5
+HANDOFF_SPIKE_S = 0.035
 PREDICT_LOOKAHEAD_S = 0.8
 PREDICT_DT_S = 0.1
+SURVIVAL_WINDOW_S = 1.0
+SURVIVAL_DT_S = 0.1
+OUTAGE_SLOPE_DB = 3.0
+CRITICAL_AOI_DEADLINE_S = 0.010
+STANDARD_AOI_DEADLINE_S = 1.0
+RELAY_OUTAGE_GUARD_DBM = -92.0
+RELAY_PENALTY_DB = 6.0
+PACKET_SUCCESS_RSS_REF_DBM = -82.0
+PACKET_SUCCESS_SLOPE_DB = 4.5
+PACKET_SUCCESS_MIN_PROB = 0.02
+PACKET_SUCCESS_MAX_PROB = 0.995
+AOI_RESET_FLOOR_S = 0.008
+TELEMETRY_SAMPLE_EVERY_N_FRAMES = 1
+TELEMETRY_MAX_ROWS = 50_000
 
 OUTPUT_DIR = Path("outputs")
 OUTAGE_RSS_THRESHOLD_DBM = -95.0
@@ -82,6 +104,35 @@ class Measurement:
     rss_dbm: float
     doppler_hz: float
     blocked: bool
+    risk_score: float = 0.0
+
+
+@dataclass
+class MovingBlocker:
+    kind: str
+    x: float
+    y: float
+    vx: float
+    vy: float
+    radius: float
+    base_loss_db: float
+    jitter_db: float
+    phase: float
+
+    def predict_position(self, dt: float) -> Tuple[float, float]:
+        return self.x + self.vx * dt, self.y + self.vy * dt
+
+
+@dataclass
+class RelayNode:
+    name: str
+    x: float
+    y: float
+    vx: float
+    vy: float
+
+    def predict_position(self, dt: float) -> Tuple[float, float]:
+        return self.x + self.vx * dt, self.y + self.vy * dt
 
 
 class Kalman2D:
@@ -119,11 +170,76 @@ class Kalman2D:
         return self.x + self.vx * horizon_s, self.y + self.vy * horizon_s
 
 
+def run_start_screen() -> bool:
+    pygame.init()
+    pygame.display.set_caption("V2X Smart Handoff Simulator - Start")
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    clock = pygame.time.Clock()
+    title_font = pygame.font.SysFont("segoe ui", 46, bold=True)
+    subtitle_font = pygame.font.SysFont("consolas", 22)
+    button_font = pygame.font.SysFont("segoe ui", 30, bold=True)
+
+    button_w = 260
+    button_h = 76
+    button_rect = pygame.Rect((WIDTH - button_w) // 2, HEIGHT // 2 + 50, button_w, button_h)
+    running = True
+    should_start = False
+
+    while running:
+        mouse_pos = pygame.mouse.get_pos()
+        hovered = button_rect.collidepoint(mouse_pos)
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                should_start = True
+                running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and hovered:
+                should_start = True
+                running = False
+
+        screen.fill((9, 13, 20))
+
+        title = title_font.render("Smart Handoff Simulator for V2X", True, TEXT_COLOR)
+        subtitle = subtitle_font.render("Click Start to open the main simulator", True, (180, 194, 220))
+        hint = subtitle_font.render("Tip: Press Enter or Space to start", True, (142, 166, 205))
+        screen.blit(title, (WIDTH // 2 - title.get_width() // 2, HEIGHT // 2 - 160))
+        screen.blit(subtitle, (WIDTH // 2 - subtitle.get_width() // 2, HEIGHT // 2 - 95))
+        screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2, HEIGHT // 2 - 60))
+
+        button_color = (103, 167, 255) if hovered else (70, 132, 219)
+        button_border = (195, 220, 255) if hovered else (140, 182, 242)
+        pygame.draw.rect(screen, button_color, button_rect, border_radius=16)
+        pygame.draw.rect(screen, button_border, button_rect, 2, border_radius=16)
+        start_text = button_font.render("Start", True, (245, 249, 255))
+        screen.blit(
+            start_text,
+            (
+                button_rect.centerx - start_text.get_width() // 2,
+                button_rect.centery - start_text.get_height() // 2,
+            ),
+        )
+
+        pygame.display.flip()
+        clock.tick(FPS)
+
+    if not should_start:
+        pygame.quit()
+    return should_start
+
+
 class V2XSmartHandoffSimulator:
-    def __init__(self) -> None:
+    def __init__(self, headless: bool = False) -> None:
+        self.headless = headless
+        if self.headless and not os.environ.get("SDL_VIDEODRIVER"):
+            os.environ["SDL_VIDEODRIVER"] = "dummy"
         pygame.init()
-        pygame.display.set_caption("V2X Smart Handoff Simulator - Enterprise")
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        if self.headless:
+            self.screen = pygame.Surface((WIDTH, HEIGHT))
+        else:
+            pygame.display.set_caption("V2X Smart Handoff Simulator - Enterprise")
+            self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock = pygame.time.Clock()
         self.start_ts = time.time()
 
@@ -139,6 +255,8 @@ class V2XSmartHandoffSimulator:
             Tower("TOWER_D", 780, HEIGHT - 180, TOWER_COLORS[3]),
         ]
         self.buildings: List[Building] = []
+        self.dynamic_blockers: List[MovingBlocker] = []
+        self.relays: List[RelayNode] = []
         self.drag_building_start: Optional[Tuple[int, int]] = None
 
         self.ue_pos = (WIDTH // 2, HEIGHT // 2)
@@ -148,6 +266,7 @@ class V2XSmartHandoffSimulator:
         self.current_tower: Tower = self.towers[0]
         self.candidate_tower: Optional[Tower] = None
         self.candidate_since = 0.0
+        self.sim_time_s = 0.0
 
         self.predictive_mode = "velocity"
         self.kalman = Kalman2D()
@@ -165,6 +284,22 @@ class V2XSmartHandoffSimulator:
         self.replay_positions: List[Tuple[int, int]] = []
         self.replay_source: Optional[Path] = None
         self.active_scenario = "baseline"
+        self.last_risk_scores: Dict[str, float] = {}
+        self.last_load_scores: Dict[str, float] = {}
+        self.last_aoi_scores: Dict[str, float] = {}
+        self.last_semantic_scores: Dict[str, float] = {}
+        self.tower_loads: Dict[str, float] = {}
+        self.connection_mode = "tower"
+        self.relay_tower_name = ""
+        self.relay_name = ""
+        self.packet_profile = "critical"
+        self.aoi_age_s = 0.0
+        self.weather_mode = "clear"
+        self.weather_entropy = 1.0
+        self.handoff_spike_until = 0.0
+        self.debug_handoff = False
+        self.last_handoff_debug: Dict[str, object] = {}
+        self.telemetry_frame_count = 0
 
         OUTPUT_DIR.mkdir(exist_ok=True)
         self.apply_scenario("baseline")
@@ -182,8 +317,24 @@ class V2XSmartHandoffSimulator:
     def get_dashboard_rect(self) -> pygame.Rect:
         return pygame.Rect(WIDTH - 430, 16, 414, HEIGHT - 32)
 
+    def get_help_lines(self) -> List[str]:
+        return [
+            "Controls:",
+            "- Move mouse: drive UE",
+            "- Drag LMB: draw building",
+            "- 1/2/3: load scenario preset",
+            "- K: switch predictor (velocity/kalman)",
+            "- U: packet urgency (critical/standard)",
+            "- W: weather (clear/rain/fog/storm)",
+            "- X: export telemetry CSV",
+            "- P: generate performance chart",
+            "- R: toggle replay from latest CSV",
+            "- E: run side-by-side A/B evaluator",
+            "- C: clear buildings | H: toggle help | ESC: quit",
+        ]
+
     def get_help_rect(self) -> pygame.Rect:
-        lines = 9
+        lines = len(self.get_help_lines())
         h = 24 + lines * 19
         return pygame.Rect(14, 14, 470, h)
 
@@ -236,6 +387,14 @@ class V2XSmartHandoffSimulator:
         self.place_towers_for_scenario(name)
         if name == "baseline":
             self.buildings = []
+            self.dynamic_blockers = [
+                MovingBlocker("pedestrian", 320, 360, 18, 0, 12, 9.0, 2.4, 0.2),
+                MovingBlocker("bus", 220, 600, 40, -8, 22, 13.5, 3.8, 1.1),
+            ]
+            self.relays = [
+                RelayNode("RELAY_1", 500, 300, 10, 12),
+                RelayNode("RELAY_2", 260, 480, 15, -10),
+            ]
             self.ue_pos = self.snap_to_safe_point(WIDTH // 2, HEIGHT // 2, radius=14)
             self.prev_ue_pos = self.ue_pos
         elif name == "urban_canyon":
@@ -243,6 +402,15 @@ class V2XSmartHandoffSimulator:
                 Building(460, 80, 110, 260),
                 Building(640, 180, 130, 310),
                 Building(500, 560, 260, 120),
+            ]
+            self.dynamic_blockers = [
+                MovingBlocker("truck", 260, 450, 46, 0, 28, 16.0, 4.8, 0.0),
+                MovingBlocker("pedestrian", 560, 160, 12, 22, 11, 8.0, 2.0, 1.6),
+                MovingBlocker("bus", 770, 520, -34, -6, 22, 13.5, 3.2, 2.2),
+            ]
+            self.relays = [
+                RelayNode("RELAY_1", 380, 580, 9, -15),
+                RelayNode("RELAY_2", 700, 420, -12, 8),
             ]
             self.ue_pos = self.snap_to_safe_point(220, 520, radius=14)
             self.prev_ue_pos = self.ue_pos
@@ -252,9 +420,159 @@ class V2XSmartHandoffSimulator:
                 Building(690, 280, 170, 120),
                 Building(550, 450, 160, 120),
             ]
+            self.dynamic_blockers = [
+                MovingBlocker("truck", 410, 640, 26, -34, 27, 15.0, 4.4, 0.7),
+                MovingBlocker("bus", 860, 300, -48, 15, 22, 12.8, 3.6, 1.2),
+                MovingBlocker("pedestrian", 600, 90, 0, 18, 10, 7.2, 2.1, 2.8),
+            ]
+            self.relays = [
+                RelayNode("RELAY_1", 470, 330, 18, 0),
+                RelayNode("RELAY_2", 820, 560, -16, -6),
+            ]
             self.ue_pos = self.snap_to_safe_point(640, 680, radius=14)
             self.prev_ue_pos = self.ue_pos
+        self.tower_loads = {tower.name: random.uniform(0.2, 0.6) for tower in self.towers}
+        self.connection_mode = "tower"
+        self.relay_name = ""
+        self.relay_tower_name = ""
         self.push_event(f"Scenario loaded: {name}")
+
+    def distance_point_to_segment(
+        self, p: Tuple[float, float], a: Tuple[float, float], b: Tuple[float, float]
+    ) -> float:
+        ax, ay = a
+        bx, by = b
+        px, py = p
+        abx = bx - ax
+        aby = by - ay
+        apx = px - ax
+        apy = py - ay
+        denom = abx * abx + aby * aby
+        if denom <= 1e-9:
+            return math.hypot(px - ax, py - ay)
+        t = max(0.0, min(1.0, (apx * abx + apy * aby) / denom))
+        cx = ax + t * abx
+        cy = ay + t * aby
+        return math.hypot(px - cx, py - cy)
+
+    def blocker_intersects_link(
+        self, blocker: MovingBlocker, p1: Tuple[float, float], p2: Tuple[float, float], future_s: float = 0.0
+    ) -> bool:
+        bx, by = blocker.predict_position(future_s)
+        # Ghost-blocker uncertainty: sensed blocker location has stochastic offset.
+        if future_s > 0.0:
+            bx += random.gauss(0.0, GHOST_NOISE_M / METER_PER_PIXEL)
+            by += random.gauss(0.0, GHOST_NOISE_M / METER_PER_PIXEL)
+        return self.distance_point_to_segment((bx, by), p1, p2) <= blocker.radius
+
+    def blocker_shadow_drop(self, blocker: MovingBlocker, time_s: float) -> float:
+        harmonic = math.sin(time_s * (0.8 + blocker.radius / 25.0) + blocker.phase)
+        stochastic = random.gauss(0.0, blocker.jitter_db * self.weather_entropy)
+        drop = blocker.base_loss_db + harmonic * blocker.jitter_db * 0.35 + stochastic * 0.25
+        return max(4.0, drop)
+
+    def update_dynamic_blockers(self, dt: float) -> None:
+        if dt <= 0.0:
+            return
+        for blocker in self.dynamic_blockers:
+            blocker.x += blocker.vx * dt
+            blocker.y += blocker.vy * dt
+            # Soft bounce to keep moving blockers in the city canvas.
+            if blocker.x < 30 or blocker.x > WIDTH - 460:
+                blocker.vx *= -1.0
+                blocker.x = max(30.0, min(WIDTH - 460.0, blocker.x))
+            if blocker.y < 30 or blocker.y > HEIGHT - 30:
+                blocker.vy *= -1.0
+                blocker.y = max(30.0, min(HEIGHT - 30.0, blocker.y))
+
+    def update_relays(self, dt: float) -> None:
+        if dt <= 0.0:
+            return
+        for relay in self.relays:
+            relay.x += relay.vx * dt
+            relay.y += relay.vy * dt
+            if relay.x < 30 or relay.x > WIDTH - 460:
+                relay.vx *= -1.0
+                relay.x = max(30.0, min(WIDTH - 460.0, relay.x))
+            if relay.y < 30 or relay.y > HEIGHT - 30:
+                relay.vy *= -1.0
+                relay.y = max(30.0, min(HEIGHT - 30.0, relay.y))
+
+    def cycle_weather(self) -> None:
+        order = ["clear", "rain", "fog", "storm"]
+        idx = (order.index(self.weather_mode) + 1) % len(order)
+        self.weather_mode = order[idx]
+        profile = {"clear": 1.0, "rain": 1.3, "fog": 1.2, "storm": 1.8}
+        self.weather_entropy = profile[self.weather_mode]
+        self.push_event(f"Weather set: {self.weather_mode}")
+
+    def toggle_packet_profile(self) -> None:
+        self.packet_profile = "standard" if self.packet_profile == "critical" else "critical"
+        self.push_event(f"Packet profile: {self.packet_profile}")
+
+    def update_tower_loads(self, dt: float) -> None:
+        for i, tower in enumerate(self.towers):
+            now = self.sim_time_s
+            base = self.tower_loads.get(tower.name, 0.4)
+            drift = math.sin(now * 0.45 + i * 1.1) * 0.02
+            noise = random.gauss(0.0, 0.015 * self.weather_entropy)
+            nxt = max(0.05, min(0.98, base + drift + noise * max(0.3, dt * FPS / 60.0)))
+            self.tower_loads[tower.name] = nxt
+
+    def predict_tower_load(self, tower: Tower, horizon_s: float = PREDICT_LOOKAHEAD_S) -> float:
+        now = self.sim_time_s
+        idx = next(i for i, t in enumerate(self.towers) if t.name == tower.name)
+        trend = math.sin((now + horizon_s) * 0.45 + idx * 1.1) * 0.04
+        return max(0.05, min(0.99, self.tower_loads.get(tower.name, 0.4) + trend))
+
+    def deadline_for_profile(self) -> float:
+        return CRITICAL_AOI_DEADLINE_S if self.packet_profile == "critical" else STANDARD_AOI_DEADLINE_S
+
+    def estimated_latency_s(self, tower: Tower, handoff: bool) -> float:
+        load = self.predict_tower_load(tower)
+        queue_delay = 0.012 + 0.11 * (load**2)
+        weather_delay = 0.004 * (self.weather_entropy - 1.0)
+        handoff_delay = HANDOFF_SPIKE_S if handoff else 0.0
+        return queue_delay + weather_delay + handoff_delay
+
+    def projected_aoi_ratio(self, tower: Tower, handoff: bool) -> float:
+        projected = self.aoi_age_s + self.estimated_latency_s(tower, handoff)
+        return projected / max(1e-4, self.deadline_for_profile())
+
+    def evaluate_relay_fallback(self) -> None:
+        current_rss = self.calculate_measurement(self.current_tower, self.ue_pos, self.ue_velocity).rss_dbm
+        if current_rss > RELAY_OUTAGE_GUARD_DBM:
+            self.connection_mode = "tower"
+            self.relay_name = ""
+            self.relay_tower_name = ""
+            return
+        best_path = None
+        best_score = -1e9
+        for relay in self.relays:
+            ue_dist = max(1.0, math.hypot(self.ue_pos[0] - relay.x, self.ue_pos[1] - relay.y))
+            ue_rss = TX_POWER_DBM - (REFERENCE_LOSS_DB + 10.0 * PATH_LOSS_EXPONENT * math.log10((ue_dist * METER_PER_PIXEL) / 1.0))
+            relay_best = max(
+                self.towers,
+                key=lambda t: self.calculate_measurement(t, (relay.x, relay.y), (0.0, 0.0)).rss_dbm - self.predict_tower_load(t) * 12.0,
+            )
+            relay_tower_rss = self.calculate_measurement(relay_best, (relay.x, relay.y), (0.0, 0.0)).rss_dbm
+            path_rss = min(ue_rss, relay_tower_rss) - RELAY_PENALTY_DB
+            if path_rss > best_score:
+                best_score = path_rss
+                best_path = (relay, relay_best)
+        if best_path and best_score > current_rss + 2.0:
+            relay, relay_tower = best_path
+            if self.connection_mode != "relay":
+                self.push_event(f"V2V RELAY ENABLED via {relay.name}")
+            self.connection_mode = "relay"
+            self.relay_name = relay.name
+            self.relay_tower_name = relay_tower.name
+        else:
+            if self.connection_mode == "relay":
+                self.push_event("V2V RELAY disabled; tower path recovered.")
+            self.connection_mode = "tower"
+            self.relay_name = ""
+            self.relay_tower_name = ""
 
     def load_replay_from_csv(self, path: Path) -> bool:
         positions: List[Tuple[int, int]] = []
@@ -307,6 +625,10 @@ class V2XSmartHandoffSimulator:
                 elif event.key == pygame.K_k:
                     self.predictive_mode = "kalman" if self.predictive_mode == "velocity" else "velocity"
                     self.push_event(f"Predictive model: {self.predictive_mode}")
+                elif event.key == pygame.K_w:
+                    self.cycle_weather()
+                elif event.key == pygame.K_u:
+                    self.toggle_packet_profile()
                 elif event.key == pygame.K_x:
                     path = self.export_telemetry()
                     self.push_event(f"Telemetry exported: {path.name}")
@@ -372,7 +694,13 @@ class V2XSmartHandoffSimulator:
         edges = [(corners[0], corners[1]), (corners[1], corners[2]), (corners[2], corners[3]), (corners[3], corners[0])]
         return any(self.segments_intersect(p1, p2, a, b) for a, b in edges)
 
-    def calculate_measurement(self, tower: Tower, ue_pos: Tuple[float, float], ue_vel: Tuple[float, float]) -> Measurement:
+    def calculate_measurement(
+        self,
+        tower: Tower,
+        ue_pos: Tuple[float, float],
+        ue_vel: Tuple[float, float],
+        future_s: float = 0.0,
+    ) -> Measurement:
         dx = ue_pos[0] - tower.x
         dy = ue_pos[1] - tower.y
         distance_px = max(1.0, math.hypot(dx, dy))
@@ -383,6 +711,20 @@ class V2XSmartHandoffSimulator:
         blocked = any(self.line_intersects_rect((tower.x, tower.y), ue_pos, b) for b in self.buildings)
         if blocked:
             rss_dbm -= SHADOWING_DROP_DB
+        for blocker in self.dynamic_blockers:
+            if self.blocker_intersects_link(blocker, (tower.x, tower.y), ue_pos, future_s=future_s):
+                rss_dbm -= self.blocker_shadow_drop(blocker, self.sim_time_s + future_s)
+                blocked = True
+        if CONFIG.enable_small_scale_fading:
+            if blocked:
+                fading_amp = np.random.rayleigh(scale=1.0)
+            else:
+                k = max(0.0, CONFIG.rician_k_factor)
+                fading_amp = math.sqrt(
+                    np.random.normal(scale=math.sqrt(k / (k + 1.0))) ** 2
+                    + np.random.normal(scale=math.sqrt(1.0 / (k + 1.0))) ** 2
+                )
+            rss_dbm += 20.0 * math.log10(max(1e-10, fading_amp))
 
         ux, uy = ue_vel
         speed = math.hypot(ux, uy)
@@ -407,10 +749,39 @@ class V2XSmartHandoffSimulator:
 
     def predict_future_rss(self, tower: Tower, horizon_s: float = PREDICT_LOOKAHEAD_S) -> float:
         px, py = self.get_predicted_position(horizon_s)
-        m = self.calculate_measurement(tower, (px, py), self.ue_velocity)
+        m = self.calculate_measurement(tower, (px, py), self.ue_velocity, future_s=horizon_s)
         return m.rss_dbm
 
+    def outage_probability_from_rss(self, rss_dbm: float) -> float:
+        x = (OUTAGE_RSS_THRESHOLD_DBM - rss_dbm) / max(0.2, OUTAGE_SLOPE_DB)
+        return 1.0 / (1.0 + math.exp(-x))
+
+    def packet_success_probability(self, rss_dbm: float) -> float:
+        x = (rss_dbm - PACKET_SUCCESS_RSS_REF_DBM) / max(0.2, PACKET_SUCCESS_SLOPE_DB)
+        p = 1.0 / (1.0 + math.exp(-x))
+        return max(PACKET_SUCCESS_MIN_PROB, min(PACKET_SUCCESS_MAX_PROB, p))
+
+    def evaluate_survival_score(self, tower: Tower, horizon_s: float = SURVIVAL_WINDOW_S) -> float:
+        samples = max(1, int(horizon_s / SURVIVAL_DT_S))
+        survival = 1.0
+        rss_acc = 0.0
+        for i in range(1, samples + 1):
+            lookahead = i * SURVIVAL_DT_S
+            px, py = self.get_predicted_position(lookahead)
+            m = self.calculate_measurement(tower, (px, py), self.ue_velocity, future_s=lookahead)
+            rss_acc += m.rss_dbm
+            outage_prob = self.outage_probability_from_rss(m.rss_dbm)
+            survival *= max(0.0, 1.0 - outage_prob * (SURVIVAL_DT_S / max(0.2, horizon_s)))
+        avg_rss = rss_acc / samples
+        rss_term = (avg_rss + 120.0) / 60.0
+        return survival + 0.18 * rss_term
+
     def update_ue_kinematics(self, dt: float) -> None:
+        if dt > 0.0:
+            self.sim_time_s += dt
+        self.update_dynamic_blockers(dt)
+        self.update_relays(dt)
+        self.update_tower_loads(dt)
         if self.replay_mode and self.replay_positions:
             self.prev_ue_pos = self.ue_pos
             self.ue_pos = self.replay_positions[self.replay_index]
@@ -436,43 +807,143 @@ class V2XSmartHandoffSimulator:
 
         predicted_current = self.predict_future_rss(self.current_tower)
         predicted_scores = {t: self.predict_future_rss(t) for t in self.towers}
+        survival_scores = {t: self.evaluate_survival_score(t) for t in self.towers}
+        load_scores = {t: self.predict_tower_load(t) for t in self.towers}
+        aoi_scores = {t: self.projected_aoi_ratio(t, handoff=(t != self.current_tower)) for t in self.towers}
+        semantic_scores = {
+            t: survival_scores[t]
+            + 0.22 * ((predicted_scores[t] + 110.0) / 45.0)
+            - 0.60 * load_scores[t]
+            - 0.80 * aoi_scores[t]
+            for t in self.towers
+        }
+        self.last_risk_scores = {t.name: survival_scores[t] for t in self.towers}
+        self.last_load_scores = {t.name: load_scores[t] for t in self.towers}
+        self.last_aoi_scores = {t.name: aoi_scores[t] for t in self.towers}
+        self.last_semantic_scores = {t.name: semantic_scores[t] for t in self.towers}
         predicted_best_tower = max(self.towers, key=lambda t: predicted_scores[t])
+        survival_best_tower = max(self.towers, key=lambda t: survival_scores[t])
+        semantic_best_tower = max(self.towers, key=lambda t: semantic_scores[t])
+        adaptive_margin = HANDOFF_MARGIN_DB + (self.weather_entropy - 1.0) * 2.0
         predictive_pressure = predicted_scores[predicted_best_tower] - predicted_current >= HANDOFF_MARGIN_DB
+        survival_pressure = (
+            survival_best_tower != self.current_tower
+            and survival_scores[survival_best_tower] - survival_scores[self.current_tower] >= 0.08
+        )
+        semantic_pressure = (
+            semantic_best_tower != self.current_tower
+            and semantic_scores[semantic_best_tower] - semantic_scores[self.current_tower] >= 0.06
+        )
 
-        trigger_by_margin = strongest != self.current_tower and (strongest_rss - current_rss >= HANDOFF_MARGIN_DB)
+        trigger_by_margin = strongest != self.current_tower and (strongest_rss - current_rss >= adaptive_margin)
         trigger_predictive = predicted_best_tower != self.current_tower and predictive_pressure
+        trigger_survival = survival_pressure
+        trigger_semantic = semantic_pressure
 
-        chosen_candidate = strongest if trigger_by_margin else predicted_best_tower
-        should_consider = trigger_by_margin or trigger_predictive
+        if trigger_by_margin:
+            chosen_candidate = strongest
+        elif trigger_semantic:
+            chosen_candidate = semantic_best_tower
+        elif trigger_survival:
+            chosen_candidate = survival_best_tower
+        else:
+            chosen_candidate = predicted_best_tower
+        should_consider = trigger_by_margin or trigger_predictive or trigger_survival or trigger_semantic
+        if self.debug_handoff:
+            self.last_handoff_debug = {
+                "t": round(self.sim_time_s, 3),
+                "current": self.current_tower.name,
+                "strongest": strongest.name,
+                "candidate": chosen_candidate.name if should_consider else "",
+                "delta_rss_db": round(strongest_rss - current_rss, 3),
+                "adaptive_margin_db": round(adaptive_margin, 3),
+                "trigger_margin": int(trigger_by_margin),
+                "trigger_predictive": int(trigger_predictive),
+                "trigger_survival": int(trigger_survival),
+                "trigger_semantic": int(trigger_semantic),
+            }
 
         if should_consider:
             if self.candidate_tower != chosen_candidate:
                 self.candidate_tower = chosen_candidate
-                self.candidate_since = time.time()
+                self.candidate_since = self.sim_time_s
             else:
-                if time.time() - self.candidate_since >= HANDOFF_HOLD_S:
+                if self.sim_time_s - self.candidate_since >= HANDOFF_HOLD_S:
                     old_name = self.current_tower.name
                     self.current_tower = chosen_candidate
+                    self.handoff_spike_until = self.sim_time_s + HANDOFF_SPIKE_S
                     self.candidate_tower = None
-                    tag = "PREDICTIVE " if trigger_predictive and not trigger_by_margin else ""
+                    tag = "AOI " if trigger_semantic and not trigger_by_margin else ""
+                    if trigger_survival and not trigger_by_margin and not trigger_semantic:
+                        tag = "SURVIVAL "
+                    if trigger_predictive and not trigger_by_margin and not trigger_survival:
+                        tag = "PREDICTIVE "
                     self.push_event(f"{tag}HANDOFF {old_name} -> {self.current_tower.name}")
         else:
             self.candidate_tower = None
+        self.evaluate_relay_fallback()
         return measurements
 
+    def update_aoi_state(self, measurements: Dict[Tower, Measurement], dt: float) -> None:
+        if dt <= 0:
+            return
+        if self.connection_mode == "tower":
+            connected_rss = measurements[self.current_tower].rss_dbm
+            connected_load = self.last_load_scores.get(self.current_tower.name, self.tower_loads.get(self.current_tower.name, 0.5))
+        else:
+            connected_rss = self.calculate_measurement(self.current_tower, self.ue_pos, self.ue_velocity).rss_dbm - RELAY_PENALTY_DB
+            connected_load = self.last_load_scores.get(self.relay_tower_name, 0.35)
+        freshness_gain = max(0.0, 0.90 - connected_load)
+        outage_penalty = 0.0
+        if connected_rss < OUTAGE_RSS_THRESHOLD_DBM:
+            outage_penalty += dt * 4.0
+        if self.sim_time_s <= self.handoff_spike_until:
+            outage_penalty += dt * 2.0
+        self.aoi_age_s = max(0.0, self.aoi_age_s + dt * (1.0 - freshness_gain) + outage_penalty)
+        recv_prob = self.packet_success_probability(connected_rss) * max(0.05, 1.0 - connected_load)
+        if random.random() < recv_prob:
+            self.aoi_age_s = min(self.aoi_age_s, AOI_RESET_FLOOR_S)
+
     def record_telemetry(self, measurements: Dict[Tower, Measurement]) -> None:
-        elapsed = time.time() - self.start_ts
+        self.telemetry_frame_count += 1
+        if TELEMETRY_SAMPLE_EVERY_N_FRAMES > 1 and (self.telemetry_frame_count % TELEMETRY_SAMPLE_EVERY_N_FRAMES != 0):
+            return
+        elapsed = self.sim_time_s
+        if self.connection_mode == "tower":
+            connected_rss = measurements[self.current_tower].rss_dbm
+        else:
+            connected_rss = (
+                self.calculate_measurement(self.current_tower, self.ue_pos, self.ue_velocity).rss_dbm
+                - RELAY_PENALTY_DB
+            )
         row: Dict[str, object] = {
             "t": round(elapsed, 4),
             "ue_x": self.ue_pos[0],
             "ue_y": self.ue_pos[1],
             "ue_vx_mps": round(self.ue_velocity[0], 4),
             "ue_vy_mps": round(self.ue_velocity[1], 4),
+            "ue_speed_mps": round(math.hypot(self.ue_velocity[0], self.ue_velocity[1]), 4),
             "current_tower": self.current_tower.name,
             "candidate_tower": self.candidate_tower.name if self.candidate_tower else "",
             "predictive_model": self.predictive_mode,
             "replay_mode": int(self.replay_mode),
+            "weather_mode": self.weather_mode,
+            "weather_entropy": round(self.weather_entropy, 4),
+            "packet_profile": self.packet_profile,
+            "aoi_age_s": round(self.aoi_age_s, 6),
+            "aoi_deadline_s": round(self.deadline_for_profile(), 6),
+            "connection_mode": self.connection_mode,
+            "relay_name": self.relay_name,
+            "relay_tower_name": self.relay_tower_name,
+            "packet_success_prob": round(self.packet_success_probability(connected_rss), 6),
         }
+        if self.last_handoff_debug:
+            row.update({f"handoff_{k}": v for k, v in self.last_handoff_debug.items()})
+        for tower in self.towers:
+            row[f"{tower.name.lower()}_risk_score"] = round(self.last_risk_scores.get(tower.name, 0.0), 6)
+            row[f"{tower.name.lower()}_load"] = round(self.last_load_scores.get(tower.name, 0.0), 6)
+            row[f"{tower.name.lower()}_aoi_ratio"] = round(self.last_aoi_scores.get(tower.name, 0.0), 6)
+            row[f"{tower.name.lower()}_semantic"] = round(self.last_semantic_scores.get(tower.name, 0.0), 6)
         for tower in self.towers:
             m = measurements[tower]
             key = tower.name.lower()
@@ -481,6 +952,8 @@ class V2XSmartHandoffSimulator:
             row[f"{key}_distance_m"] = round(m.distance_m, 4)
             row[f"{key}_blocked"] = int(m.blocked)
         self.telemetry.append(row)
+        if len(self.telemetry) > TELEMETRY_MAX_ROWS:
+            del self.telemetry[: len(self.telemetry) - TELEMETRY_MAX_ROWS]
 
     def export_telemetry(self) -> Path:
         if not self.telemetry:
@@ -706,6 +1179,27 @@ class V2XSmartHandoffSimulator:
             temp = Building(float(sx), float(sy), float(ex - sx), float(ey - sy)).to_rect()
             pygame.draw.rect(self.screen, (210, 220, 230), temp, 2, border_radius=4)
 
+        for blocker in self.dynamic_blockers:
+            if blocker.kind == "pedestrian":
+                color = (235, 180, 72)
+            elif blocker.kind == "bus":
+                color = (240, 125, 120)
+            else:
+                color = (176, 146, 255)
+            center = (int(blocker.x), int(blocker.y))
+            pygame.draw.circle(self.screen, color, center, int(blocker.radius))
+            pygame.draw.circle(self.screen, (245, 245, 252), center, int(blocker.radius), 2)
+            label = blocker.kind[0].upper()
+            self.screen.blit(self.small_font.render(label, True, (248, 248, 255)), (center[0] - 4, center[1] - 8))
+        for relay in self.relays:
+            center = (int(relay.x), int(relay.y))
+            pygame.draw.polygon(
+                self.screen,
+                (124, 238, 246),
+                [(center[0], center[1] - 10), (center[0] + 8, center[1] + 8), (center[0] - 8, center[1] + 8)],
+            )
+            self.screen.blit(self.small_font.render("R", True, (210, 252, 255)), (center[0] - 4, center[1] - 26))
+
     def draw_links_and_towers(self, measurements: Dict[Tower, Measurement]) -> None:
         for tower in self.towers:
             m = measurements[tower]
@@ -715,6 +1209,12 @@ class V2XSmartHandoffSimulator:
             pygame.draw.circle(self.screen, tower.color, (int(tower.x), int(tower.y)), radius)
             pygame.draw.circle(self.screen, (240, 240, 255), (int(tower.x), int(tower.y)), radius, 2)
             self.screen.blit(self.small_font.render(tower.name, True, tower.color), (int(tower.x) + 12, int(tower.y) - 26))
+        if self.connection_mode == "relay":
+            relay = next((r for r in self.relays if r.name == self.relay_name), None)
+            relay_tower = next((t for t in self.towers if t.name == self.relay_tower_name), None)
+            if relay and relay_tower:
+                pygame.draw.line(self.screen, (96, 255, 244), self.ue_pos, (int(relay.x), int(relay.y)), 3)
+                pygame.draw.line(self.screen, (96, 255, 244), (int(relay.x), int(relay.y)), (int(relay_tower.x), int(relay_tower.y)), 3)
 
     def draw_ue(self) -> None:
         pygame.draw.circle(self.screen, UE_RING, self.ue_pos, 14, 2)
@@ -732,16 +1232,36 @@ class V2XSmartHandoffSimulator:
         self.screen.blit(self.small_font.render(f"UE speed: {speed:6.2f} m/s", True, TEXT_COLOR), (panel.x + 16, panel.y + 74))
         self.screen.blit(self.small_font.render(f"Predictive model: {self.predictive_mode}", True, WARN_COLOR), (panel.x + 16, panel.y + 96))
         self.screen.blit(self.small_font.render(f"Replay: {'ON' if self.replay_mode else 'OFF'}", True, WARN_COLOR), (panel.x + 16, panel.y + 118))
+        self.screen.blit(
+            self.small_font.render(f"Packet={self.packet_profile} | Weather={self.weather_mode}", True, (158, 205, 255)),
+            (panel.x + 16, panel.y + 140),
+        )
+        self.screen.blit(
+            self.small_font.render(f"AoI={self.aoi_age_s:0.3f}s / {self.deadline_for_profile():0.3f}s", True, (186, 219, 255)),
+            (panel.x + 16, panel.y + 160),
+        )
+        mode_text = f"Mode: {self.connection_mode.upper()}"
+        if self.connection_mode == "relay":
+            mode_text += f" ({self.relay_name}->{self.relay_tower_name})"
+        self.screen.blit(self.small_font.render(mode_text, True, (143, 248, 226)), (panel.x + 16, panel.y + 180))
 
-        y = panel.y + 150
+        y = panel.y + 204
         for tower in self.towers:
             m = measurements[tower]
             color = tower.color if tower != self.current_tower else GOOD_COLOR
             text = f"{tower.name} | d={m.distance_m:6.1f}m | RSS={m.rss_dbm:6.1f} dBm | fd={m.doppler_hz:7.1f}Hz"
             self.screen.blit(self.small_font.render(text, True, color), (panel.x + 12, y))
             y += 22
+            risk = self.last_risk_scores.get(tower.name, 0.0)
+            load = self.last_load_scores.get(tower.name, 0.0)
+            aoi = self.last_aoi_scores.get(tower.name, 0.0)
+            self.screen.blit(
+                self.small_font.render(f"  surv={risk:0.3f} load={load:0.2f} aoi={aoi:0.2f}", True, (172, 193, 236)),
+                (panel.x + 12, y),
+            )
+            y += 18
             if m.blocked:
-                self.screen.blit(self.small_font.render("  LOS blocked by building", True, BAD_COLOR), (panel.x + 12, y))
+                self.screen.blit(self.small_font.render("  LOS blocked by building/blocker", True, BAD_COLOR), (panel.x + 12, y))
                 y += 18
 
         y += 8
@@ -754,18 +1274,7 @@ class V2XSmartHandoffSimulator:
     def draw_help(self) -> None:
         if not self.show_help:
             return
-        lines = [
-            "Controls:",
-            "- Move mouse: drive UE",
-            "- Drag LMB: draw building",
-            "- 1/2/3: load scenario preset",
-            "- K: switch predictor (velocity/kalman)",
-            "- X: export telemetry CSV",
-            "- P: generate performance chart",
-            "- R: toggle replay from latest CSV",
-            "- E: run side-by-side A/B evaluator",
-            "- C: clear buildings | H: toggle help | ESC: quit",
-        ]
+        lines = self.get_help_lines()
         h = 24 + len(lines) * 19
         help_rect = pygame.Rect(14, 14, 470, h)
         pygame.draw.rect(self.screen, (10, 15, 23), help_rect, border_radius=10)
@@ -789,12 +1298,15 @@ class V2XSmartHandoffSimulator:
     def run(self) -> None:
         self.push_event("Simulator started.")
         while self.running:
-            dt = self.clock.tick(FPS) / 1000.0
-            self.handle_events()
+            dt = (self.clock.tick(FPS) / 1000.0) if not self.headless else (1.0 / FPS)
+            if not self.headless:
+                self.handle_events()
             self.update_ue_kinematics(dt)
             measurements = self.update_handoff_logic()
+            self.update_aoi_state(measurements, dt)
             self.record_telemetry(measurements)
-            self.draw(measurements)
+            if not self.headless:
+                self.draw(measurements)
 
         if self.telemetry and not self.last_export_path:
             path = self.export_telemetry()
@@ -803,6 +1315,8 @@ class V2XSmartHandoffSimulator:
 
 
 def main() -> None:
+    if not run_start_screen():
+        return
     simulator = V2XSmartHandoffSimulator()
     simulator.run()
 

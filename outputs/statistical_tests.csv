@@ -1,0 +1,13 @@
+metric,algorithm_1,algorithm_2,t_statistic,p_value,significant,cohens_d,effect_size
+avg_aoi,a3,greedy,1.5641556591048276,0.2206376915357089,False,1.5641556591048276,large
+avg_aoi,a3,my_algorithm,2.836758872845365,0.10270962811632461,False,2.836758872845365,large
+avg_aoi,greedy,my_algorithm,2.3345781097706215,0.13411366454364732,False,2.3345781097706215,large
+peak_aoi,a3,greedy,1.2511713756115912,0.30277273966959484,False,1.2511713756115912,large
+peak_aoi,a3,my_algorithm,2.20302444513601,0.13614546006104888,False,2.20302444513601,large
+peak_aoi,greedy,my_algorithm,1.593856168438282,0.1960720409777303,False,1.593856168438282,large
+handoff_count,a3,greedy,-3.1827326676996535,0.08568019211435483,False,-3.1827326676996535,large
+handoff_count,a3,my_algorithm,-1.0,0.42264973081037416,False,-1.0000000000000002,large
+handoff_count,greedy,my_algorithm,3.1399482564693493,0.08821294839631971,False,3.139948256469349,large
+outage_time_s,a3,greedy,,,False,0.0,small
+outage_time_s,a3,my_algorithm,,,False,0.0,small
+outage_time_s,greedy,my_algorithm,,,False,0.0,small

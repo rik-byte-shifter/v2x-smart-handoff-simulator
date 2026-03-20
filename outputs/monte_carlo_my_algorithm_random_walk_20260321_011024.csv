@@ -1,0 +1,12 @@
+Metric,Value
+Algorithm,my_algorithm
+Trajectory Pattern,random_walk
+Number of Trials,50
+Duration per Trial (s),30.0
+
+Metric,Mean,Std Dev,95% CI Low,95% CI High
+avg_aoi,8.697597,5.886256,7.007757,10.387436
+peak_aoi,17.339083,11.772946,13.959280,20.718886
+handoff_count,0.000000,0.000000,0.000000,0.000000
+ping_pong_count,0.000000,0.000000,0.000000,0.000000
+outage_time_s,0.014333,0.029061,0.005990,0.022676

@@ -1,0 +1,12 @@
+Metric,Value
+Algorithm,My Algorithm (DT-enabled)
+Trajectory Pattern,linear
+Number of Trials,50
+Duration per Trial (s),30.0
+
+Metric,Mean,Std Dev,95% CI Low,95% CI High
+avg_aoi,0.034357,0.034933,0.024328,0.044386
+peak_aoi,0.543669,0.418472,0.423534,0.663805
+handoff_count,7.080000,9.035131,4.486175,9.673825
+ping_pong_count,0.000000,0.000000,0.000000,0.000000
+outage_time_s,0.021333,0.146971,-0.020859,0.063526

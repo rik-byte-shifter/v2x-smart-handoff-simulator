@@ -1,0 +1,12 @@
+Metric,Value
+Algorithm,Greedy RSS
+Trajectory Pattern,circular
+Number of Trials,50
+Duration per Trial (s),30.0
+
+Metric,Mean,Std Dev,95% CI Low,95% CI High
+avg_aoi,0.211779,0.054250,0.196204,0.227353
+peak_aoi,1.495667,0.488988,1.355287,1.636046
+handoff_count,16.100000,3.981206,14.957067,17.242933
+ping_pong_count,0.480000,0.854166,0.234784,0.725216
+outage_time_s,0.000000,0.000000,0.000000,0.000000
