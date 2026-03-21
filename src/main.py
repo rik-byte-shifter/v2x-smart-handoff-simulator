@@ -9,6 +9,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# Repo root (config.py lives next to src/, not inside it)
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import numpy as np
 import pygame
 
@@ -58,6 +63,13 @@ CRITICAL_AOI_DEADLINE_S = 0.010
 STANDARD_AOI_DEADLINE_S = 1.0
 RELAY_OUTAGE_GUARD_DBM = -92.0
 RELAY_PENALTY_DB = 6.0
+
+# Invisible background UEs per tower (birth–death sessions → cross-traffic load share).
+BACKGROUND_LOAD_PER_SESSION = 0.058
+BACKGROUND_CROSS_LOAD_CAP = 0.52
+BACKGROUND_SESSION_BIRTH_RATE = 2.6
+BACKGROUND_SESSION_DEATH_RATE = 0.38
+BACKGROUND_MAX_SESSIONS = 14
 PACKET_SUCCESS_RSS_REF_DBM = -82.0
 PACKET_SUCCESS_SLOPE_DB = 4.5
 PACKET_SUCCESS_MIN_PROB = 0.02
@@ -65,6 +77,14 @@ PACKET_SUCCESS_MAX_PROB = 0.995
 AOI_RESET_FLOOR_S = 0.008
 TELEMETRY_SAMPLE_EVERY_N_FRAMES = 1
 TELEMETRY_MAX_ROWS = 50_000
+
+# Ablation/control knobs (used by evaluation scripts).
+SEMANTIC_W_SURVIVAL = 1.00
+SEMANTIC_W_PREDICTED_RSS = 0.22
+SEMANTIC_W_LOAD = 0.60
+SEMANTIC_W_AOI = 0.80
+ENABLE_PREDICTIVE_TRIGGER = True
+ENABLE_RELAY_FALLBACK = True
 
 OUTPUT_DIR = Path("outputs")
 OUTAGE_RSS_THRESHOLD_DBM = -95.0
@@ -238,7 +258,7 @@ class V2XSmartHandoffSimulator:
         if self.headless:
             self.screen = pygame.Surface((WIDTH, HEIGHT))
         else:
-            pygame.display.set_caption("V2X Smart Handoff Simulator - Enterprise")
+            pygame.display.set_caption("V2X Smart Handoff Simulator")
             self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock = pygame.time.Clock()
         self.start_ts = time.time()
@@ -289,6 +309,9 @@ class V2XSmartHandoffSimulator:
         self.last_aoi_scores: Dict[str, float] = {}
         self.last_semantic_scores: Dict[str, float] = {}
         self.tower_loads: Dict[str, float] = {}
+        self.scheduled_tower_loads: Dict[str, float] = {}
+        self.background_session_count: Dict[str, int] = {}
+        self.cross_traffic_load: Dict[str, float] = {}
         self.connection_mode = "tower"
         self.relay_tower_name = ""
         self.relay_name = ""
@@ -301,8 +324,47 @@ class V2XSmartHandoffSimulator:
         self.last_handoff_debug: Dict[str, object] = {}
         self.telemetry_frame_count = 0
 
+        self._init_policy_knobs_from_module_constants()
+
         OUTPUT_DIR.mkdir(exist_ok=True)
         self.apply_scenario("baseline")
+
+    def _init_policy_knobs_from_module_constants(self) -> None:
+        """Instance policy knobs (Monte Carlo ablations mutate these, not module globals)."""
+        self.semantic_w_survival = SEMANTIC_W_SURVIVAL
+        self.semantic_w_predicted_rss = SEMANTIC_W_PREDICTED_RSS
+        self.semantic_w_load = SEMANTIC_W_LOAD
+        self.semantic_w_aoi = SEMANTIC_W_AOI
+        self.enable_predictive_trigger = ENABLE_PREDICTIVE_TRIGGER
+        self.enable_relay_fallback = ENABLE_RELAY_FALLBACK
+        self.handoff_margin_db = HANDOFF_MARGIN_DB
+        self.handoff_hold_s = HANDOFF_HOLD_S
+        self.enable_small_scale_fading_override: Optional[bool] = None
+
+    def apply_policy_profile(self, profile: Dict[str, float | bool]) -> None:
+        """Apply a full knob dict (e.g. merged module defaults + ablation overrides)."""
+        self.semantic_w_survival = float(profile["w_survival"])
+        self.semantic_w_predicted_rss = float(profile["w_pred_rss"])
+        self.semantic_w_load = float(profile["w_load"])
+        self.semantic_w_aoi = float(profile["w_aoi"])
+        self.enable_predictive_trigger = bool(profile["enable_predictive_trigger"])
+        self.enable_relay_fallback = bool(profile["enable_relay_fallback"])
+
+    def reset_monte_carlo_trial_state(self) -> None:
+        """Reset per-trial dynamics when reusing one simulator across Monte Carlo trials."""
+        self.sim_time_s = 0.0
+        self.kalman = Kalman2D()
+        self.current_tower = self.towers[0]
+        self.candidate_tower = None
+        self.candidate_since = 0.0
+        self.handoff_spike_until = 0.0
+        self.aoi_age_s = 0.0
+        self.connection_mode = "tower"
+        self.relay_name = ""
+        self.relay_tower_name = ""
+        self.replay_index = 0
+        self.last_handoff_debug = {}
+        self.telemetry_frame_count = 0
 
     def push_event(self, message: str) -> None:
         ts = time.strftime("%H:%M:%S")
@@ -431,7 +493,7 @@ class V2XSmartHandoffSimulator:
             ]
             self.ue_pos = self.snap_to_safe_point(640, 680, radius=14)
             self.prev_ue_pos = self.ue_pos
-        self.tower_loads = {tower.name: random.uniform(0.2, 0.6) for tower in self.towers}
+        self._reset_tower_load_state_for_scenario()
         self.connection_mode = "tower"
         self.relay_name = ""
         self.relay_tower_name = ""
@@ -459,7 +521,7 @@ class V2XSmartHandoffSimulator:
         self, blocker: MovingBlocker, p1: Tuple[float, float], p2: Tuple[float, float], future_s: float = 0.0
     ) -> bool:
         bx, by = blocker.predict_position(future_s)
-        # Ghost-blocker uncertainty: sensed blocker location has stochastic offset.
+        # Noisy future-state geometry: perturbed blocker position before LOS test (sensor-error stand-in; same model as present-time blockage).
         if future_s > 0.0:
             bx += random.gauss(0.0, GHOST_NOISE_M / METER_PER_PIXEL)
             by += random.gauss(0.0, GHOST_NOISE_M / METER_PER_PIXEL)
@@ -510,20 +572,60 @@ class V2XSmartHandoffSimulator:
         self.packet_profile = "standard" if self.packet_profile == "critical" else "critical"
         self.push_event(f"Packet profile: {self.packet_profile}")
 
+    def _reset_tower_load_state_for_scenario(self) -> None:
+        """Scheduled (slow) load plus invisible cross-traffic sessions per tower."""
+        self.scheduled_tower_loads = {tower.name: random.uniform(0.18, 0.58) for tower in self.towers}
+        self.background_session_count = {tower.name: random.randint(2, 9) for tower in self.towers}
+        self.cross_traffic_load = {}
+        self._sync_cross_load_from_session_counts()
+        self.tower_loads = {}
+        for tower in self.towers:
+            s = self.scheduled_tower_loads[tower.name]
+            c = self.cross_traffic_load[tower.name]
+            self.tower_loads[tower.name] = max(0.05, min(0.99, s + c))
+
+    def _sync_cross_load_from_session_counts(self) -> None:
+        for tower in self.towers:
+            n = int(self.background_session_count.get(tower.name, 0))
+            self.cross_traffic_load[tower.name] = min(
+                BACKGROUND_CROSS_LOAD_CAP,
+                n * BACKGROUND_LOAD_PER_SESSION,
+            )
+
+    def _step_invisible_background_sessions(self, dt: float) -> None:
+        if dt <= 0.0:
+            return
+        lam = BACKGROUND_SESSION_BIRTH_RATE * max(0.5, self.weather_entropy)
+        mu = BACKGROUND_SESSION_DEATH_RATE
+        survive_p = math.exp(-mu * dt)
+        for tower in self.towers:
+            n = int(self.background_session_count.get(tower.name, 0))
+            births = int(np.random.poisson(lam * dt))
+            survivors = sum(1 for _ in range(n) if random.random() < survive_p)
+            n = max(0, min(BACKGROUND_MAX_SESSIONS, survivors + births))
+            self.background_session_count[tower.name] = n
+        self._sync_cross_load_from_session_counts()
+
     def update_tower_loads(self, dt: float) -> None:
+        self._step_invisible_background_sessions(dt)
         for i, tower in enumerate(self.towers):
             now = self.sim_time_s
-            base = self.tower_loads.get(tower.name, 0.4)
+            base = self.scheduled_tower_loads.get(tower.name, 0.4)
             drift = math.sin(now * 0.45 + i * 1.1) * 0.02
             noise = random.gauss(0.0, 0.015 * self.weather_entropy)
-            nxt = max(0.05, min(0.98, base + drift + noise * max(0.3, dt * FPS / 60.0)))
-            self.tower_loads[tower.name] = nxt
+            nxt = max(0.05, min(0.92, base + drift + noise * max(0.3, dt * FPS / 60.0)))
+            self.scheduled_tower_loads[tower.name] = nxt
+            cross = self.cross_traffic_load.get(tower.name, 0.0)
+            self.tower_loads[tower.name] = max(0.05, min(0.99, nxt + cross))
 
     def predict_tower_load(self, tower: Tower, horizon_s: float = PREDICT_LOOKAHEAD_S) -> float:
         now = self.sim_time_s
         idx = next(i for i, t in enumerate(self.towers) if t.name == tower.name)
         trend = math.sin((now + horizon_s) * 0.45 + idx * 1.1) * 0.04
-        return max(0.05, min(0.99, self.tower_loads.get(tower.name, 0.4) + trend))
+        base_sched = self.scheduled_tower_loads.get(tower.name, 0.4)
+        pred_sched = max(0.05, min(0.92, base_sched + trend))
+        cross = self.cross_traffic_load.get(tower.name, 0.0)
+        return max(0.05, min(0.99, pred_sched + cross))
 
     def deadline_for_profile(self) -> float:
         return CRITICAL_AOI_DEADLINE_S if self.packet_profile == "critical" else STANDARD_AOI_DEADLINE_S
@@ -715,7 +817,12 @@ class V2XSmartHandoffSimulator:
             if self.blocker_intersects_link(blocker, (tower.x, tower.y), ue_pos, future_s=future_s):
                 rss_dbm -= self.blocker_shadow_drop(blocker, self.sim_time_s + future_s)
                 blocked = True
-        if CONFIG.enable_small_scale_fading:
+        fading_on = (
+            self.enable_small_scale_fading_override
+            if self.enable_small_scale_fading_override is not None
+            else CONFIG.enable_small_scale_fading
+        )
+        if fading_on:
             if blocked:
                 fading_amp = np.random.rayleigh(scale=1.0)
             else:
@@ -811,10 +918,10 @@ class V2XSmartHandoffSimulator:
         load_scores = {t: self.predict_tower_load(t) for t in self.towers}
         aoi_scores = {t: self.projected_aoi_ratio(t, handoff=(t != self.current_tower)) for t in self.towers}
         semantic_scores = {
-            t: survival_scores[t]
-            + 0.22 * ((predicted_scores[t] + 110.0) / 45.0)
-            - 0.60 * load_scores[t]
-            - 0.80 * aoi_scores[t]
+            t: self.semantic_w_survival * survival_scores[t]
+            + self.semantic_w_predicted_rss * ((predicted_scores[t] + 110.0) / 45.0)
+            - self.semantic_w_load * load_scores[t]
+            - self.semantic_w_aoi * aoi_scores[t]
             for t in self.towers
         }
         self.last_risk_scores = {t.name: survival_scores[t] for t in self.towers}
@@ -824,8 +931,8 @@ class V2XSmartHandoffSimulator:
         predicted_best_tower = max(self.towers, key=lambda t: predicted_scores[t])
         survival_best_tower = max(self.towers, key=lambda t: survival_scores[t])
         semantic_best_tower = max(self.towers, key=lambda t: semantic_scores[t])
-        adaptive_margin = HANDOFF_MARGIN_DB + (self.weather_entropy - 1.0) * 2.0
-        predictive_pressure = predicted_scores[predicted_best_tower] - predicted_current >= HANDOFF_MARGIN_DB
+        adaptive_margin = self.handoff_margin_db + (self.weather_entropy - 1.0) * 2.0
+        predictive_pressure = predicted_scores[predicted_best_tower] - predicted_current >= self.handoff_margin_db
         survival_pressure = (
             survival_best_tower != self.current_tower
             and survival_scores[survival_best_tower] - survival_scores[self.current_tower] >= 0.08
@@ -836,7 +943,9 @@ class V2XSmartHandoffSimulator:
         )
 
         trigger_by_margin = strongest != self.current_tower and (strongest_rss - current_rss >= adaptive_margin)
-        trigger_predictive = predicted_best_tower != self.current_tower and predictive_pressure
+        trigger_predictive = (
+            self.enable_predictive_trigger and predicted_best_tower != self.current_tower and predictive_pressure
+        )
         trigger_survival = survival_pressure
         trigger_semantic = semantic_pressure
 
@@ -868,7 +977,7 @@ class V2XSmartHandoffSimulator:
                 self.candidate_tower = chosen_candidate
                 self.candidate_since = self.sim_time_s
             else:
-                if self.sim_time_s - self.candidate_since >= HANDOFF_HOLD_S:
+                if self.sim_time_s - self.candidate_since >= self.handoff_hold_s:
                     old_name = self.current_tower.name
                     self.current_tower = chosen_candidate
                     self.handoff_spike_until = self.sim_time_s + HANDOFF_SPIKE_S
@@ -881,7 +990,12 @@ class V2XSmartHandoffSimulator:
                     self.push_event(f"{tag}HANDOFF {old_name} -> {self.current_tower.name}")
         else:
             self.candidate_tower = None
-        self.evaluate_relay_fallback()
+        if self.enable_relay_fallback:
+            self.evaluate_relay_fallback()
+        else:
+            self.connection_mode = "tower"
+            self.relay_name = ""
+            self.relay_tower_name = ""
         return measurements
 
     def update_aoi_state(self, measurements: Dict[Tower, Measurement], dt: float) -> None:
@@ -1016,7 +1130,7 @@ class V2XSmartHandoffSimulator:
 
     def evaluate_model(self, model: str, positions: List[Tuple[int, int]]) -> Dict[str, object]:
         dt = 1.0 / FPS
-        hold_frames = max(1, int(HANDOFF_HOLD_S * FPS))
+        hold_frames = max(1, int(self.handoff_hold_s * FPS))
         kalman = Kalman2D()
 
         current_tower = self.towers[0]
@@ -1054,10 +1168,14 @@ class V2XSmartHandoffSimulator:
                 t: self.calculate_measurement(t, ppos, vel).rss_dbm for t in self.towers
             }
             predicted_best = max(self.towers, key=lambda t: predicted_scores[t])
-            predictive_pressure = predicted_scores[predicted_best] - predicted_scores[current_tower] >= HANDOFF_MARGIN_DB
-
-            trigger_by_margin = strongest != current_tower and (strongest_rss - current_rss >= HANDOFF_MARGIN_DB)
-            trigger_predictive = predicted_best != current_tower and predictive_pressure
+            predictive_pressure = (
+                predicted_scores[predicted_best] - predicted_scores[current_tower] >= self.handoff_margin_db
+            )
+            adaptive_margin = self.handoff_margin_db + (self.weather_entropy - 1.0) * 2.0
+            trigger_by_margin = strongest != current_tower and (strongest_rss - current_rss >= adaptive_margin)
+            trigger_predictive = (
+                self.enable_predictive_trigger and predicted_best != current_tower and predictive_pressure
+            )
             should_consider = trigger_by_margin or trigger_predictive
             chosen_candidate = strongest if trigger_by_margin else predicted_best
 
@@ -1226,7 +1344,7 @@ class V2XSmartHandoffSimulator:
         pygame.draw.rect(self.screen, PANEL_BG, panel, border_radius=12)
         pygame.draw.rect(self.screen, PANEL_BORDER, panel, 2, border_radius=12)
 
-        self.screen.blit(self.title_font.render("V2X Smart Handoff Enterprise", True, TEXT_COLOR), (panel.x + 12, panel.y + 12))
+        self.screen.blit(self.title_font.render("V2X Smart Handoff Simulator", True, TEXT_COLOR), (panel.x + 12, panel.y + 12))
         speed = math.hypot(self.ue_velocity[0], self.ue_velocity[1])
         self.screen.blit(self.small_font.render(f"Connected: {self.current_tower.name}", True, GOOD_COLOR), (panel.x + 16, panel.y + 52))
         self.screen.blit(self.small_font.render(f"UE speed: {speed:6.2f} m/s", True, TEXT_COLOR), (panel.x + 16, panel.y + 74))

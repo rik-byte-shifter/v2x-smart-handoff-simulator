@@ -53,12 +53,14 @@ REPRODUCIBILITY_CONFIG: Dict[str, Any] = {
         "headless_monte_carlo": True,
         "enable_small_scale_fading": False,
         "rician_k_factor": 10.0,
+        "monte_carlo_enable_small_scale_fading": True,
         # Default trial count for standalone ``monte_carlo_runner.py`` / ``config.CONFIG`` runs.
         # Factorial batch evaluation in ``compare_algorithms.py`` uses ``PRIMARY_TRIALS`` (100)
         # and ``SECONDARY_TRIALS`` (25) per cell instead—see that module for power allocation.
         "monte_carlo_trials": 100,
         "monte_carlo_duration_s": 30.0,
         "monte_carlo_base_seed": 42,
+        "bootstrap_n_resamples": 1999,
     },
     # Matches monte_carlo_runner.MonteCarloEvaluator._ablation_profile + full policy.
     "semantic_weights": {
@@ -102,9 +104,11 @@ REPRODUCIBILITY_CONFIG: Dict[str, Any] = {
         },
     },
     "notes": [
-        "Ablation runs mutate module-level globals in src/main.py inside try/finally; see MonteCarloEvaluator._apply_ablation_knobs.",
+        "Ablation runs apply merged knob dicts per trial on each V2XSmartHandoffSimulator instance (see MonteCarloEvaluator._merged_policy_profile).",
         "compare_algorithms factorial: PRIMARY_TRIALS / SECONDARY_TRIALS in compare_algorithms.py "
         "(urban_canyon × trajectories use primary; optional uniform n_trials= overrides all).",
+        "Tower load = scheduled component + cross-traffic from per-tower invisible UE sessions (birth–death); see BACKGROUND_* in src/main.py.",
+        "Monte Carlo uses CONFIG.monte_carlo_enable_small_scale_fading (Rician LOS / Rayleigh NLOS) via sim.enable_small_scale_fading_override; GUI uses CONFIG.enable_small_scale_fading unless override is set.",
     ],
 }
 

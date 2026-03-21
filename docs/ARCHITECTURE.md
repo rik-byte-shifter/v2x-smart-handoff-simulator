@@ -43,6 +43,7 @@ The project uses a log-distance approximation:
 
 - For future-state evaluation, blocker position is perturbed with stochastic sensor noise.
 - This prevents unrealistically perfect foresight and makes the policy robust to noisy measurements.
+- **Scope:** This is **forward prediction inside the same geometry + path-loss model**—not a calibrated *digital twin* of a real deployment (no fused maps, no live RAN telemetry, no external validation).
 
 ### Doppler
 
@@ -58,6 +59,10 @@ where `lambda = c / f`.
 
 - Find strongest currently measured tower by RSS.
 
+### Robust A3+ (stronger baseline)
+
+- Same hysteresis and time-to-trigger (TTT) as the simplified A3 event, but **candidates are ranked by load-adjusted RSS**: `RSS − k · load` using simulator `tower_loads`. A handoff is considered toward the best alternative when its effective RSS exceeds **raw** serving RSS by the hysteresis margin, and the condition persists for TTT.
+
 ### Predictive candidate pressure
 
 - Forecast UE position over a short horizon.
@@ -69,7 +74,7 @@ Two forecasting modes are available:
 - `velocity` mode: direct extrapolation from measured UE velocity.
 - `kalman` mode: alpha-beta style constant-velocity filtering and prediction.
 
-### Risk-Aware Survival Policy (New Innovation)
+### Risk-Aware Survival Policy
 
 - A survival score is evaluated per tower over a future window.
 - At each step in the window, outage probability is estimated from predicted RSS.
@@ -83,7 +88,7 @@ Two forecasting modes are available:
   - `standard` (relaxed freshness target)
 - For each candidate tower, the policy estimates:
   - predicted RSS/survival
-  - predicted tower congestion (load)
+  - predicted tower congestion (load)—**synthetic** load trace in the simulator, not measured congestion
   - projected Age of Information ratio
   - handoff latency spike cost
 - Final tower choice is a semantic score balancing urgency vs quality, not RSS alone.
@@ -114,7 +119,7 @@ Two forecasting modes are available:
 
 This makes the simulator useful for demos, class presentations, and algorithm explanation.
 
-## 5) Enterprise Tooling
+## 5) Tooling and scenarios
 
 ### Scenario Presets
 
@@ -144,7 +149,7 @@ This makes the simulator useful for demos, class presentations, and algorithm ex
 ### Replay Engine
 
 - Replay mode loads UE trajectory from exported telemetry and drives the UE automatically.
-- This enables deterministic demos for interview/portfolio presentations.
+- This enables deterministic replays of a fixed trajectory for testing and figures.
 
 ### Performance Charts
 
@@ -163,3 +168,11 @@ This makes the simulator useful for demos, class presentations, and algorithm ex
   - average connected RSS
   - outage time below threshold
 - It also generates `outputs/ab_eval_*.png` for visual comparison.
+
+## 6) Simulation scope and limitations (claims)
+
+This stack is a **geometric 2D simulator**: log-distance path loss, binary building shadowing, heuristic moving-blocker attenuation, and Doppler from UE motion. It **does not** implement full **3GPP TR 38.901** channel models, interference-limited scheduling, or **map- / trace-driven** mobility. Outcomes should be read as **algorithmic relative performance** under controlled conditions, not absolute field performance.
+
+**Parameters** (see `src/main.py`, `config.py`): η = 2.4, PL(d₀) = 32.44 dB at d₀ = 1 m and f = 5.9 GHz, −20 dB building LOS penalty, TX 30 dBm, optional Rician/Rayleigh fading (**off by default** in `config.py`).
+
+Longer narrative, blocker-class table, and repo cross-checks: **`docs/SIMULATION_FIDELITY_AND_LIMITATIONS.md`**.

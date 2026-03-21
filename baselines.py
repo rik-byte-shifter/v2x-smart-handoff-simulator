@@ -55,6 +55,77 @@ class A3HandoffBaseline:
         return current_tower, False, None
 
 
+class RobustA3Baseline:
+    """
+    A3-style event with load-aware effective RSS and time-to-trigger (TTT).
+
+    Candidate attractiveness: ``RSS - load_offset_db * load`` (penalizes congested cells).
+    Entry condition (vs serving): ``effective_candidate > serving_RSS + hysteresis_db``,
+    then TTT must elapse before handoff (same structure as :class:`A3HandoffBaseline`).
+    """
+
+    def __init__(
+        self,
+        hysteresis_db: float = 3.0,
+        time_to_trigger_s: float = 0.5,
+        load_offset_db: float = 2.0,
+    ):
+        self.hysteresis_db = hysteresis_db
+        self.time_to_trigger_s = time_to_trigger_s
+        self.load_offset_db = load_offset_db
+        self.candidate_tower: Optional[Tower] = None
+        self.candidate_start_time: Optional[float] = None
+
+    def reset(self) -> None:
+        self.candidate_tower = None
+        self.candidate_start_time = None
+
+    def _effective_rss(
+        self,
+        sim: V2XSmartHandoffSimulator,
+        tower: Tower,
+        measurements: Dict[Tower, Measurement],
+    ) -> float:
+        rss = measurements[tower].rss_dbm
+        load = float(sim.tower_loads.get(tower.name, 0.5))
+        return rss - self.load_offset_db * load
+
+    def decide(
+        self,
+        sim: V2XSmartHandoffSimulator,
+        measurements: Dict[Tower, Measurement],
+    ) -> Tuple[Tower, bool, Optional[str]]:
+        current_tower = sim.current_tower
+        current_rss = measurements[current_tower].rss_dbm
+
+        others = [t for t in sim.towers if t != current_tower]
+        if not others:
+            return current_tower, False, None
+
+        best = max(others, key=lambda t: self._effective_rss(sim, t, measurements))
+        best_effective = self._effective_rss(sim, best, measurements)
+
+        now_s = getattr(sim, "sim_time_s", None)
+        if now_s is None:
+            now_s = time.time()
+
+        if best_effective > current_rss + self.hysteresis_db:
+            if self.candidate_tower != best:
+                self.candidate_tower = best
+                self.candidate_start_time = now_s
+            elif self.candidate_start_time is not None and (
+                now_s - self.candidate_start_time >= self.time_to_trigger_s
+            ):
+                old_name = current_tower.name
+                self.reset()
+                return best, True, f"RobustA3 HANDOFF {old_name} -> {best.name}"
+        else:
+            if self.candidate_tower == best:
+                self.reset()
+
+        return current_tower, False, None
+
+
 class GreedyRSSBaseline:
     """Always connect to strongest instantaneous RSS."""
 
@@ -68,6 +139,59 @@ class GreedyRSSBaseline:
         if strongest != current_tower:
             old_name = current_tower.name
             return strongest, True, f"GREEDY HANDOFF {old_name} -> {strongest.name}"
+        return current_tower, False, None
+
+
+class MPCLookaheadBaseline:
+    """
+    Short-horizon model-predictive style baseline: maximize sum of predicted RSS over
+    ``horizon_s`` with step ``dt_s``, minus a one-time dB penalty if switching away
+    from the serving cell at the first step (reduces ping-pong vs greedy).
+    """
+
+    def __init__(self, horizon_s: float = 1.0, dt_s: float = 0.1, handoff_cost_db: float = 3.0):
+        self.horizon_s = float(horizon_s)
+        self.dt_s = max(1e-6, float(dt_s))
+        self.handoff_cost_db = float(handoff_cost_db)
+
+    def decide(
+        self,
+        sim: V2XSmartHandoffSimulator,
+        measurements: Dict[Tower, Measurement],
+    ) -> Tuple[Tower, bool, Optional[str]]:
+        best_score = -np.inf
+        best_tower = sim.current_tower
+        current_tower = sim.current_tower
+
+        n_steps = max(1, int(np.ceil(self.horizon_s / self.dt_s)))
+
+        for candidate in sim.towers:
+            score = 0.0
+            for step in range(n_steps):
+                lookahead = min(step * self.dt_s, self.horizon_s)
+                pred_pos = sim.get_predicted_position(lookahead)
+                pos = (float(pred_pos[0]), float(pred_pos[1]))
+                m = sim.calculate_measurement(
+                    candidate,
+                    pos,
+                    sim.ue_velocity,
+                    future_s=lookahead,
+                )
+                pred_rss = m.rss_dbm
+                penalty = (
+                    self.handoff_cost_db
+                    if (candidate != current_tower and step == 0)
+                    else 0.0
+                )
+                score += pred_rss - penalty
+
+            if score > best_score:
+                best_score = score
+                best_tower = candidate
+
+        if best_tower != current_tower:
+            old_name = current_tower.name
+            return best_tower, True, f"MPC HANDOFF {old_name} -> {best_tower.name}"
         return current_tower, False, None
 
 
@@ -158,6 +282,8 @@ class BaselineRunner:
     def __init__(self, sim: V2XSmartHandoffSimulator):
         self.sim = sim
         self.a3 = A3HandoffBaseline()
+        self.robust_a3 = RobustA3Baseline()
+        self.mpc = MPCLookaheadBaseline()
         self.greedy = GreedyRSSBaseline()
         self.qlearning: Optional[QLearningHandoffBaseline] = None
 
@@ -191,8 +317,12 @@ class BaselineRunner:
 
             if algorithm == "a3":
                 chosen_tower, handoff, _ = self.a3.decide(sim, measurements)
+            elif algorithm == "robust_a3":
+                chosen_tower, handoff, _ = self.robust_a3.decide(sim, measurements)
             elif algorithm == "greedy":
                 chosen_tower, handoff, _ = self.greedy.decide(sim, measurements)
+            elif algorithm == "mpc":
+                chosen_tower, handoff, _ = self.mpc.decide(sim, measurements)
             elif algorithm == "qlearning":
                 assert self.qlearning is not None
                 reward = -sim.aoi_age_s

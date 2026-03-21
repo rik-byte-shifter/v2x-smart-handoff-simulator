@@ -13,8 +13,10 @@ def compare_algorithms(
     trajectory_pattern: str = "random_walk",
 ) -> Dict[str, Dict]:
     algorithms = [
-        ("my_algorithm", "my_algorithm"),
+        ("Proposed (Survival-Aware)", "my_algorithm"),
         ("A3 (3GPP)", "a3_3gpp"),
+        ("Robust A3+", "a3_robust"),
+        ("MPC lookahead", "mpc_lookahead"),
         ("Greedy RSS", "greedy_rss"),
         ("Q-Learning", "q_learning"),
     ]
@@ -41,6 +43,7 @@ def compare_algorithms(
             debug_mode=False,
         )
         result["algorithm"] = display_name
+        result["algorithm_key"] = algorithm_key
         results_list.append(result)
         summary[display_name] = result
         csv_path = evaluator.save_results_to_csv(result, output_dir=str(output_dir))
