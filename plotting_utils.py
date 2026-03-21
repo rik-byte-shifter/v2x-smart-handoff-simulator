@@ -3,6 +3,17 @@ from typing import Dict, List, Optional, Tuple
 
 from config import CONFIG
 
+# Primary inferential metrics for paper-facing CSV subset (see docs/ANALYSIS_PROTOCOL.md).
+PRIMARY_STATISTICAL_METRICS = frozenset(
+    {
+        "avg_aoi_external",
+        "peak_aoi_external",
+        "handoff_count",
+        "ping_pong_count",
+        "outage_time_s",
+    }
+)
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -56,7 +67,10 @@ def plot_cdf_comparison(results_list: List[Dict], metric: str, output_path: str,
     colors = ["#2E86AB", "#A23B72", "#F18F01", "#C73E1D", "#6A994E"]
 
     for idx, result in enumerate(results_list):
-        values = [r[metric] for r in result["all_results"]]
+        raw = [r.get(metric) for r in result["all_results"]]
+        values = [float(v) for v in raw if v is not None and isinstance(v, (int, float)) and np.isfinite(v)]
+        if not values:
+            continue
         sorted_vals = np.sort(values)
         cdf = np.arange(1, len(sorted_vals) + 1) / len(sorted_vals)
 
@@ -98,7 +112,8 @@ def plot_boxplot_comparison(results_list: List[Dict], metric: str, output_path: 
     labels = []
 
     for result in results_list:
-        values = [r[metric] for r in result["all_results"]]
+        raw = [r.get(metric) for r in result["all_results"]]
+        values = [float(v) for v in raw if v is not None and isinstance(v, (int, float)) and np.isfinite(v)]
         data.append(values)
         labels.append(f"{result['algorithm']}\n(n={len(values)})")
 
@@ -172,6 +187,37 @@ def plot_time_series_example(result: Dict, output_path: str, n_samples: int = 10
     plt.close()
 
     print(f"Time series plot saved: {output_path}")
+
+
+def _cliffs_delta(data1: List[float], data2: List[float]) -> float:
+    """
+    Cliff's delta effect size for two groups (nonparametric; suitable for discrete counts).
+    Returns (prop(x1 > x2) - prop(x1 < x2)) over all pairs; in [-1, 1].
+    """
+    x = np.asarray(data1, dtype=float)
+    y = np.asarray(data2, dtype=float)
+    if x.size == 0 or y.size == 0:
+        return float("nan")
+    greater = 0
+    less = 0
+    for a in x:
+        greater += int(np.sum(a > y))
+        less += int(np.sum(a < y))
+    denom = x.size * y.size
+    return (greater - less) / denom if denom else float("nan")
+
+
+def _cliffs_delta_magnitude_label(d: float) -> str:
+    if not np.isfinite(d):
+        return ""
+    ad = abs(d)
+    if ad < 0.147:
+        return "negligible"
+    if ad < 0.33:
+        return "small"
+    if ad < 0.474:
+        return "medium"
+    return "large"
 
 
 def _bootstrap_mean_diff_ci(
@@ -466,15 +512,33 @@ def run_targeted_proposed_vs_a3_all_cells(
     return df
 
 
-def run_statistical_tests(results_list: List[Dict], output_path: str):
+def run_statistical_tests(
+    results_list: List[Dict],
+    output_path: str,
+    primary_output_path: Optional[str] = None,
+):
     """
     Pairwise comparisons: Mann–Whitney U for count metrics (skewed/discrete),
     Welch's t-test for continuous metrics. Reported effect and bootstrap CI match the
     scale of the test: Hodges–Lehmann median difference (bootstrap CI) for counts,
     mean difference (bootstrap CI) for continuous metrics. Mean-based bootstrap CIs
     are still recorded as ``mean_diff`` / ``bootstrap_ci_diff_*`` for all metrics.
+
+    For discrete count metrics, **Cohen's d is omitted** (NaN): mean/std-based d can
+    explode when variances are tiny; use **Cliff's delta** instead (``cliffs_delta``).
+
+    If ``primary_output_path`` is set, a second CSV is written containing only rows
+    whose metric is in ``PRIMARY_STATISTICAL_METRICS`` (external AoI + churn + outage).
     """
-    metrics = ["avg_aoi", "peak_aoi", "handoff_count", "ping_pong_count", "outage_time_s"]
+    metrics = [
+        "avg_aoi_external",
+        "peak_aoi_external",
+        "avg_aoi",
+        "peak_aoi",
+        "handoff_count",
+        "ping_pong_count",
+        "outage_time_s",
+    ]
     count_metrics = frozenset({"handoff_count", "ping_pong_count"})
     report = []
 
@@ -571,16 +635,22 @@ def run_statistical_tests(results_list: List[Dict], output_path: str):
                         effect_label = "Mean difference (bootstrap 95% CI)"
 
                     pooled_std = np.sqrt((np.std(data1) ** 2 + np.std(data2) ** 2) / 2)
-                    cohens_d = mean_diff / pooled_std if pooled_std > 0 else 0.0
+                    if metric in count_metrics:
+                        cohens_d = float("nan")
+                        cliffs = _cliffs_delta(data1, data2)
+                        effect_size = _cliffs_delta_magnitude_label(cliffs)
+                    else:
+                        cliffs = float("nan")
+                        cohens_d = mean_diff / pooled_std if pooled_std > 0 else 0.0
+                        effect_size = (
+                            "large"
+                            if abs(cohens_d) > 0.8
+                            else "medium"
+                            if abs(cohens_d) > 0.5
+                            else "small"
+                        )
 
                     significance = "SIGNIFICANT" if p_value < 0.05 else "NOT significant"
-                    effect_size = (
-                        "large"
-                        if abs(cohens_d) > 0.8
-                        else "medium"
-                        if abs(cohens_d) > 0.5
-                        else "small"
-                    )
 
                     print(f"  {algo1} vs {algo2}:")
                     print(f"    test:        {test_type}")
@@ -595,7 +665,13 @@ def run_statistical_tests(results_list: List[Dict], output_path: str):
                         f"    mean diff:   {mean_diff:.6f}  "
                         f"95% bootstrap CI (mean): [{boot_lo:.6f}, {boot_hi:.6f}]"
                     )
-                    print(f"    Cohen's d:   {cohens_d:.4f} ({effect_size} effect)")
+                    if metric in count_metrics:
+                        print(
+                            f"    Cliff's d:   {cliffs:.4f} ({effect_size}) "
+                            f"(Cohen's d omitted for discrete counts)"
+                        )
+                    else:
+                        print(f"    Cohen's d:   {cohens_d:.4f} ({effect_size} effect)")
 
                     report.append(
                         {
@@ -618,6 +694,7 @@ def run_statistical_tests(results_list: List[Dict], output_path: str):
                             "effect_ci_high": eff_hi,
                             "effect_label": effect_label,
                             "cohens_d": cohens_d,
+                            "cliffs_delta": cliffs,
                             "effect_size": effect_size,
                             "p_value_corrected_holm": 1.0,
                             "significant_corrected_holm": False,
@@ -645,6 +722,13 @@ def run_statistical_tests(results_list: List[Dict], output_path: str):
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
 
+    if primary_output_path:
+        primary_df = df[df["metric"].isin(PRIMARY_STATISTICAL_METRICS)]
+        ppath = Path(primary_output_path)
+        ppath.parent.mkdir(parents=True, exist_ok=True)
+        primary_df.to_csv(ppath, index=False)
+        print(f"Primary-endpoint subset saved to: {primary_output_path}")
+
     print("\n" + "=" * 80)
     print(f"Full report saved to: {output_path}")
     print("=" * 80 + "\n")
@@ -654,13 +738,15 @@ def run_statistical_tests(results_list: List[Dict], output_path: str):
 
 def plot_all_metrics_boxplots(results_list: List[Dict], output_dir: str):
     """
-    Generate boxplots for ALL core metrics in one figure.
+    Generate boxplots for core metrics in one figure (external AoI first, then exploratory internal AoI).
     """
     metrics = [
-        ("avg_aoi", "Average AoI (s)"),
-        ("peak_aoi", "Peak AoI (s)"),
-        ("handoff_count", "Handoff Count"),
-        ("outage_time_s", "Outage Time (s)"),
+        ("avg_aoi_external", "Avg external AoI (s) — primary"),
+        ("peak_aoi_external", "Peak external AoI (s) — primary"),
+        ("avg_aoi", "Avg internal AoI (s) — exploratory"),
+        ("peak_aoi", "Peak internal AoI (s) — exploratory"),
+        ("handoff_count", "Handoff count"),
+        ("outage_time_s", "Outage time (s)"),
     ]
 
     # Aggregate per algorithm label
@@ -669,7 +755,7 @@ def plot_all_metrics_boxplots(results_list: List[Dict], output_dir: str):
         grouped.setdefault(result["algorithm"], []).append(result)
     algorithms = sorted(grouped.keys())
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
     axes = axes.flatten()
 
     colors = ["#2E86AB", "#A23B72", "#F18F01", "#C73E1D", "#6A994E"]
@@ -680,7 +766,10 @@ def plot_all_metrics_boxplots(results_list: List[Dict], output_dir: str):
         for algo in algorithms:
             values = []
             for result in grouped[algo]:
-                values.extend([trial[metric] for trial in result["all_results"]])
+                for trial in result["all_results"]:
+                    v = trial.get(metric)
+                    if v is not None and isinstance(v, (int, float)) and np.isfinite(float(v)):
+                        values.append(float(v))
             data.append(values)
             labels.append(f"{algo}\n(n={len(values)})")
 

@@ -1,9 +1,13 @@
 """
 Algorithm comparison: full factorial over scenario × weather × packet profile × trajectory,
 or a compact legacy mode (single environment).
+
+For long runs, use ``quick=True`` or ``python compare_algorithms.py --quick`` (see README).
 """
 
+import argparse
 import math
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -38,6 +42,22 @@ DEFAULT_FACTORIAL_N_TRIALS = SECONDARY_TRIALS
 
 PRIMARY_TRIAL_SCENARIOS = frozenset({"urban_canyon"})
 PRIMARY_TRIAL_PATTERNS = frozenset({"random_walk", "linear", "circular", "manhattan_grid", "highway"})
+
+# Fast smoke / iteration (~100×+ faster than full factorial): matches primary inference env
+# (urban_canyon, clear, critical) and the three trajectories in ``PRIMARY_ENDPOINTS``.
+QUICK_TRAJECTORIES = ["random_walk", "linear", "circular"]
+QUICK_ENV_CELLS: List[Tuple[str, str, str]] = [("urban_canyon", "clear", "critical")]
+QUICK_DEFAULT_TRIALS = 20
+QUICK_DEFAULT_DURATION_S = 15.0
+
+# Full grid size (for runtime hints): patterns × scenarios × weathers × profiles
+def _full_factorial_num_cells() -> int:
+    return (
+        len(TRAJECTORY_PATTERNS)
+        * len(SCENARIOS)
+        * len(WEATHER_MODES)
+        * len(PACKET_PROFILES)
+    )
 
 
 def _n_trials_for_factorial_cell(
@@ -192,7 +212,7 @@ def _matches_plot_filter(result: Dict, scenario: str, weather: str, profile: str
 
 
 def write_subgroup_proposed_table(rows: List[Dict], output_path: str) -> Path:
-    """Subgroup analysis: proposed policy AoI vs scenario / weather / profile / trajectory."""
+    """Subgroup detail CSV: proposed policy **external** AoI (primary) + internal AoI (exploratory) per cell."""
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -205,55 +225,76 @@ def write_subgroup_proposed_table(rows: List[Dict], output_path: str) -> Path:
 
 def build_subgroup_analysis_table(all_results: List[Dict]) -> pd.DataFrame:
     """
-    Paper-style subgroup table: Proposed vs A3 (3GPP) mean AoI, aggregated over
-    trajectory patterns within each (scenario, weather, profile) cell.
+    Paper-style subgroup table: Proposed vs A3 (3GPP), aggregated over trajectory
+    patterns within each (scenario, weather, profile) cell.
 
-    Improvement = (A3 − Proposed) / A3 × 100% (lower AoI is better; shown as ``NN% ↓``).
+    **Primary rows (paper-facing):** mean **external AoI** (``avg_aoi_external_mean``)—
+    independent packet process; see ``compute_external_aoi``.
+
+    **Exploratory columns:** internal simulator AoI (``avg_aoi_mean``), coupled to policy
+    mechanics—report in supplement only.
+
+    Improvement = (A3 − Proposed) / A3 × 100% (lower AoI is better; ``NN% ↓``).
     """
-    # (scenario, weather, profile) -> algorithm_key -> list of avg_aoi_mean (one per trajectory)
-    by_cell: Dict[Tuple, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    by_cell: Dict[Tuple, Dict[str, List[Tuple[float, float]]]] = defaultdict(lambda: defaultdict(list))
 
     for r in all_results:
         key = r.get("algorithm_key")
         if key not in ("my_algorithm", "a3"):
             continue
-        m = r.get("avg_aoi_mean")
-        if m is None or not isinstance(m, (int, float)):
+        ext = r.get("avg_aoi_external_mean")
+        internal = r.get("avg_aoi_mean")
+        if ext is None or not isinstance(ext, (int, float)):
             continue
+        if internal is None or not isinstance(internal, (int, float)):
+            internal = float("nan")
         sc = r.get("experiment_scenario")
         if sc is None:
             continue
         w = r.get("weather_mode")
         p = r.get("packet_profile")
         cell = (sc, w, p)
-        by_cell[cell][key].append(float(m))
+        by_cell[cell][key].append((float(ext), float(internal)))
 
     rows: List[Dict] = []
     for cell in sorted(by_cell.keys(), key=lambda c: (str(c[0]), str(c[1]), str(c[2]))):
-        pv = by_cell[cell].get("my_algorithm", [])
-        av = by_cell[cell].get("a3", [])
-        if not pv or not av:
+        pairs_p = by_cell[cell].get("my_algorithm", [])
+        pairs_a = by_cell[cell].get("a3", [])
+        if not pairs_p or not pairs_a:
             continue
-        proposed_mean = sum(pv) / len(pv)
-        a3_mean = sum(av) / len(av)
-        if a3_mean > 1e-12:
-            imp_pct = (a3_mean - proposed_mean) / a3_mean * 100.0
+        proposed_ext = sum(t[0] for t in pairs_p) / len(pairs_p)
+        a3_ext = sum(t[0] for t in pairs_a) / len(pairs_a)
+        int_p = [t[1] for t in pairs_p if math.isfinite(t[1])]
+        int_a = [t[1] for t in pairs_a if math.isfinite(t[1])]
+        proposed_int = sum(int_p) / len(int_p) if int_p else float("nan")
+        a3_int = sum(int_a) / len(int_a) if int_a else float("nan")
+        if a3_ext > 1e-12:
+            imp_ext = (a3_ext - proposed_ext) / a3_ext * 100.0
         else:
-            imp_pct = float("nan")
+            imp_ext = float("nan")
+        if math.isfinite(a3_int) and a3_int > 1e-12:
+            imp_int = (a3_int - proposed_int) / a3_int * 100.0
+        else:
+            imp_int = float("nan")
         sc, w, p = cell
-        imp_str = f"{imp_pct:.0f}% ↓" if math.isfinite(imp_pct) else ""
+        imp_str = f"{imp_ext:.0f}% ↓" if math.isfinite(imp_ext) else ""
 
         rows.append(
             {
                 "Scenario": SCENARIO_DISPLAY.get(sc, str(sc)),
                 "Weather": WEATHER_DISPLAY.get(w, w if w else ""),
                 "Profile": PROFILE_DISPLAY.get(p, p if p else ""),
-                "Proposed_AoI_s": round(proposed_mean, 6),
-                "A3_AoI_s": round(a3_mean, 6),
-                "Proposed_AoI": f"{proposed_mean:.3f}s",
-                "A3_AoI": f"{a3_mean:.3f}s",
-                "Improvement_pct": round(imp_pct, 2) if math.isfinite(imp_pct) else "",
-                "Improvement": imp_str,
+                "Proposed_External_AoI_s": round(proposed_ext, 6),
+                "A3_External_AoI_s": round(a3_ext, 6),
+                "Proposed_External_AoI": f"{proposed_ext:.3f}s",
+                "A3_External_AoI": f"{a3_ext:.3f}s",
+                "Improvement_External_pct": round(imp_ext, 2) if math.isfinite(imp_ext) else "",
+                "Improvement_External": imp_str,
+                "Proposed_Internal_AoI_s_exploratory": round(proposed_int, 6),
+                "A3_Internal_AoI_s_exploratory": round(a3_int, 6),
+                "Improvement_Internal_pct_exploratory": round(imp_int, 2)
+                if math.isfinite(imp_int)
+                else "",
             }
         )
 
@@ -265,40 +306,50 @@ def run_comprehensive_comparison(
     n_trials: Optional[int] = None,
     base_seed: int = 42,
     plot_filter: Optional[Tuple[str, str, str]] = DEFAULT_PLOT_FILTER,
+    quick: bool = False,
+    duration_s: Optional[float] = None,
+    slim_baselines: bool = False,
 ) -> List[Dict]:
     """
     Run all algorithms across trajectory patterns and, if ``full_factorial`` is True,
     across scenarios, weather modes, and packet profiles.
 
+    ``quick=True``: only ``QUICK_TRAJECTORIES`` × ``QUICK_ENV_CELLS``, default
+    ``QUICK_DEFAULT_TRIALS`` and ``QUICK_DEFAULT_DURATION_S`` (override with
+    ``n_trials`` / ``duration_s``). For publication use full factorial.
+
+    ``slim_baselines=True``: omit greedy and Q-learning (~2/7 less work per cell).
+
     By default, **urban_canyon** cells use ``PRIMARY_TRIALS`` and all other scenarios
-    use ``SECONDARY_TRIALS`` (better power on the pre-specified primary family). Pass
-    ``n_trials`` to force the same count in every cell (e.g. quick runs).
-
-    Writes ``outputs/subgroup_proposed_aoi.csv`` and ``outputs/subgroup_analysis_table.csv``
-    (Proposed vs A3, improvement %) when results are available.
-
-    Statistical tests group by (pattern, scenario, weather, profile) when factorial
-    metadata is present. A **pre-specified primary family** (``PRIMARY_ENDPOINTS``)
-    gets Holm correction across that family only and is written to
-    ``outputs/primary_family_tests.csv``; the full ``statistical_tests.csv`` grid is
-    exploratory outside that family. Summary plots use ``plot_filter`` (default:
-    urban_canyon / clear / critical) so boxplots are not mixed across 24 environment cells.
+    use ``SECONDARY_TRIALS``. Pass ``n_trials`` to force the same count in every cell.
     """
+    if duration_s is None:
+        duration_s = QUICK_DEFAULT_DURATION_S if quick else 30.0
+
     algorithms = {
         "my_algorithm": "Proposed (Survival-Aware)",
         "a3": "A3 (3GPP Standard)",
         "robust_a3": "Robust A3+ (load-aware RSS + TTT)",
         "mpc": "MPC lookahead (RSS + handoff penalty)",
+        "velocity_aided": "Velocity-aided RSS (lookahead + TTT)",
         "greedy": "Greedy RSS",
         "qlearning": "Q-Learning",
     }
+    if slim_baselines:
+        algorithms.pop("greedy", None)
+        algorithms.pop("qlearning", None)
 
     all_results: List[Dict] = []
     subgroup_rows: List[Dict] = []
 
-    if not full_factorial:
+    quick_trials: Optional[int] = None
+    if quick:
+        patterns = list(QUICK_TRAJECTORIES)
+        envs = list(QUICK_ENV_CELLS)
+        quick_trials = n_trials if n_trials is not None else QUICK_DEFAULT_TRIALS
+    elif not full_factorial:
         patterns = TRAJECTORY_PATTERNS
-        envs: List[Tuple[Optional[str], Optional[str], Optional[str]]] = [
+        envs = [
             ("urban_canyon", None, None),
         ]
     else:
@@ -306,12 +357,28 @@ def run_comprehensive_comparison(
         envs = [(s, w, p) for s in SCENARIOS for w in WEATHER_MODES for p in PACKET_PROFILES]
 
     total_cells = len(patterns) * len(envs)
+    n_alg = len(algorithms)
+    if quick:
+        print(
+            f"\n>>> QUICK MODE: {total_cells} cells × {n_alg} algorithms "
+            f"× {quick_trials} trials × {duration_s:.0f}s sim "
+            f"(vs full factorial {_full_factorial_num_cells()} cells — much faster).\n"
+        )
+    elif full_factorial:
+        print(
+            f"\n>>> FULL FACTORIAL: {_full_factorial_num_cells()} cells × {n_alg} algorithms "
+            f"(urban_canyon up to {PRIMARY_TRIALS} trials, others {SECONDARY_TRIALS}). "
+            "Long wall-clock expected.\n"
+        )
     cell_idx = 0
 
     for pattern in patterns:
         for scenario, weather, profile in envs:
             cell_idx += 1
-            cell_n_trials = _n_trials_for_factorial_cell(scenario, pattern, n_trials)
+            if quick:
+                cell_n_trials = quick_trials
+            else:
+                cell_n_trials = _n_trials_for_factorial_cell(scenario, pattern, n_trials)
             print(f"\n{'=' * 70}")
             print(
                 f"CELL {cell_idx}/{total_cells} | pattern={pattern} | "
@@ -325,7 +392,7 @@ def run_comprehensive_comparison(
             for algo_name, algo_display in algorithms.items():
                 result = evaluator.run_monte_carlo(
                     n_trials=cell_n_trials,
-                    duration_s=30.0,
+                    duration_s=duration_s,
                     trajectory_pattern=pattern,
                     algorithm=algo_name,
                     base_seed=base_seed,
@@ -351,24 +418,38 @@ def run_comprehensive_comparison(
                         "weather": weather,
                         "profile": profile,
                         "trajectory_pattern": pattern,
-                        "proposed_avg_aoi_mean": proposed["avg_aoi_mean"],
-                        "proposed_avg_aoi_ci_low": proposed["avg_aoi_ci_low"],
-                        "proposed_avg_aoi_ci_high": proposed["avg_aoi_ci_high"],
-                        "proposed_avg_aoi_external_mean": proposed.get("avg_aoi_external_mean", float("nan")),
+                        "proposed_avg_aoi_external_mean": proposed.get(
+                            "avg_aoi_external_mean", float("nan")
+                        ),
+                        "proposed_avg_aoi_external_ci_low": proposed.get(
+                            "avg_aoi_external_ci_low", float("nan")
+                        ),
+                        "proposed_avg_aoi_external_ci_high": proposed.get(
+                            "avg_aoi_external_ci_high", float("nan")
+                        ),
+                        "proposed_avg_aoi_mean_exploratory": proposed["avg_aoi_mean"],
+                        "proposed_avg_aoi_ci_low_exploratory": proposed["avg_aoi_ci_low"],
+                        "proposed_avg_aoi_ci_high_exploratory": proposed["avg_aoi_ci_high"],
                         "proposed_peak_aoi_mean": proposed["peak_aoi_mean"],
                         "n_trials": cell_n_trials,
                     }
                 )
 
             out_dir = Path("outputs") / "comparison_factorial" / pattern
-            if full_factorial:
+            if full_factorial or quick:
                 tag = f"{scenario}_{weather}_{profile}"
             else:
                 tag = "default_env"
             out_dir = out_dir / tag
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            for metric in ["avg_aoi", "peak_aoi", "handoff_count"]:
+            for metric in [
+                "avg_aoi_external",
+                "peak_aoi_external",
+                "avg_aoi",
+                "peak_aoi",
+                "handoff_count",
+            ]:
                 plot_cdf_comparison(
                     pattern_results,
                     metric=metric,
@@ -378,9 +459,15 @@ def run_comprehensive_comparison(
 
             plot_boxplot_comparison(
                 pattern_results,
+                metric="avg_aoi_external",
+                output_path=str(out_dir / "boxplot_aoi_external.png"),
+                title=f"Average External AoI (primary) — {pattern} / {tag}",
+            )
+            plot_boxplot_comparison(
+                pattern_results,
                 metric="avg_aoi",
-                output_path=str(out_dir / "boxplot_aoi.png"),
-                title=f"Average AoI — {pattern} / {tag}",
+                output_path=str(out_dir / "boxplot_aoi_internal_exploratory.png"),
+                title=f"Average Internal AoI (exploratory) — {pattern} / {tag}",
             )
 
     if subgroup_rows:
@@ -402,7 +489,7 @@ def run_comprehensive_comparison(
     print("Subgroup vs A3:  outputs/subgroup_analysis_table.csv")
 
     results_for_plots = all_results
-    if plot_filter and full_factorial:
+    if plot_filter and (full_factorial or quick):
         sc, w, p = plot_filter
         results_for_plots = [r for r in all_results if _matches_plot_filter(r, sc, w, p)]
         if not results_for_plots:
@@ -415,6 +502,7 @@ def run_comprehensive_comparison(
     stats_report = run_statistical_tests(
         all_results,
         output_path="outputs/statistical_tests.csv",
+        primary_output_path="outputs/statistical_tests_primary_endpoints.csv",
     )
     _ = stats_report
 
@@ -429,7 +517,7 @@ def run_comprehensive_comparison(
     print("\n" + "=" * 80)
     print(
         "PRIMARY FAMILY (pre-specified): Holm across "
-        f"{len(PRIMARY_ENDPOINTS)} tests only → outputs/primary_family_tests.csv"
+        f"{len(PRIMARY_ENDPOINTS)} tests only -> outputs/primary_family_tests.csv"
     )
     print("=" * 80)
     primary_summary = run_primary_tests(all_results)
@@ -444,7 +532,7 @@ def run_comprehensive_comparison(
         sig = "yes" if row.get("significant_corrected_holm") else "no"
         print(
             f"  {row['trajectory_pattern']}: p={row['p_value']:.4g}, "
-            f"p_holm={row['p_value_corrected_holm']:.4g}, sig(α=0.05)={sig}"
+            f"p_holm={row['p_value_corrected_holm']:.4g}, sig(a=0.05)={sig}"
         )
 
     print("\n" + "=" * 80)
@@ -458,31 +546,47 @@ def run_comprehensive_comparison(
 
     print("\nALL ANALYSES COMPLETE!")
     print("Check outputs/ for:")
-    print("  - statistical_tests.csv (pairwise tests per pattern × environment cell; exploratory outside primary family)")
+    print("  - statistical_tests.csv (all metrics; exploratory outside primary family except noted)")
+    print("  - statistical_tests_primary_endpoints.csv (external AoI + churn + outage only; paper-facing grid)")
     print("  - primary_family_tests.csv (pre-specified primary endpoint family; Holm across this set only)")
     print("  - targeted_proposed_vs_a3_tests.csv (Proposed vs A3 only; aligns with subgroup table)")
     print("  - subgroup_proposed_aoi.csv (per-trajectory proposed AoI)")
-    print("  - subgroup_analysis_table.csv (Proposed vs A3, mean over trajectories; Improvement %)")
-    print("  - comparison_factorial/… (CDFs and boxplots per cell)")
+    print("  - subgroup_analysis_table.csv (Proposed vs A3; primary = external AoI; internal = exploratory)")
+    print("  - comparison_factorial/... (CDFs and boxplots per cell)")
     print("  - comparison_all_metrics/all_metrics_boxplots.png (filtered summary)")
 
     return all_results
 
 
-def run_ablation_study():
+def run_ablation_study(
+    n_trials: int = 50,
+    duration_s: float = 30.0,
+    patterns: Optional[List[str]] = None,
+    base_seed: int = 42,
+) -> List[Dict]:
     """
-    Run ablation study for the proposed policy (predictive + survival + semantic AoI terms).
+    Run ablation study for the proposed policy (predictive + survival + AoI utility terms).
+
+    Defaults match the original paper-style run (50 trials × 30 s × five trajectories).
+    For faster appendix smoke tests, pass e.g. ``n_trials=15``, ``duration_s=15.0``,
+    ``patterns=["random_walk", "linear", "circular"]``.
     """
     variants = {
-        "my_algorithm": "Proposed (Survival-Aware) — full",
+        "my_algorithm": "Proposed (Survival-Aware) - full",
         "no_survival": "w/o survival score",
         "no_aoi": "w/o AoI term",
         "no_load": "w/o load penalty",
         "reactive_only": "Reactive only (no predictive trigger)",
         "no_relay": "w/o V2V relay fallback",
     }
-    patterns = ["random_walk", "linear", "circular", "manhattan_grid", "highway"]
+    if patterns is None:
+        patterns = ["random_walk", "linear", "circular", "manhattan_grid", "highway"]
     all_results = []
+
+    print(
+        f"\n>>> ABLATION: {len(patterns)} pattern(s) × {len(variants)} variants × "
+        f"{n_trials} trials × {duration_s:.0f}s sim\n"
+    )
 
     for pattern in patterns:
         print(f"\n{'=' * 70}")
@@ -493,11 +597,11 @@ def run_ablation_study():
         evaluator = MonteCarloEvaluator(base_scenario="urban_canyon")
         for algo_key, display_name in variants.items():
             result = evaluator.run_monte_carlo(
-                n_trials=50,
-                duration_s=30.0,
+                n_trials=n_trials,
+                duration_s=duration_s,
                 trajectory_pattern=pattern,
                 algorithm=algo_key,
-                base_seed=42,
+                base_seed=base_seed,
                 scenario="urban_canyon",
                 weather_mode="clear",
                 packet_profile="critical",
@@ -511,7 +615,14 @@ def run_ablation_study():
         output_dir = Path("outputs") / f"ablation_{pattern}"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        for metric in ["avg_aoi", "peak_aoi", "handoff_count", "outage_time_s"]:
+        for metric in [
+            "avg_aoi_external",
+            "peak_aoi_external",
+            "avg_aoi",
+            "peak_aoi",
+            "handoff_count",
+            "outage_time_s",
+        ]:
             plot_cdf_comparison(
                 pattern_results,
                 metric=metric,
@@ -521,16 +632,102 @@ def run_ablation_study():
 
         plot_boxplot_comparison(
             pattern_results,
+            metric="avg_aoi_external",
+            output_path=str(output_dir / "boxplot_aoi_external.png"),
+            title=f"Ablation Average External AoI (primary) - {pattern.replace('_', ' ').title()}",
+        )
+        plot_boxplot_comparison(
+            pattern_results,
             metric="avg_aoi",
-            output_path=str(output_dir / "boxplot_aoi.png"),
-            title=f"Ablation Average AoI - {pattern.replace('_', ' ').title()}",
+            output_path=str(output_dir / "boxplot_aoi_internal_exploratory.png"),
+            title=f"Ablation Average Internal AoI (exploratory) - {pattern.replace('_', ' ').title()}",
         )
         all_results.extend(pattern_results)
 
-    run_statistical_tests(all_results, output_path="outputs/statistical_tests_ablation.csv")
+    run_statistical_tests(
+        all_results,
+        output_path="outputs/statistical_tests_ablation.csv",
+        primary_output_path="outputs/statistical_tests_ablation_primary_endpoints.csv",
+    )
     plot_all_metrics_boxplots(all_results, output_dir="outputs/ablation_all_metrics")
     return all_results
 
 
 if __name__ == "__main__":
-    results = run_comprehensive_comparison()
+    parser = argparse.ArgumentParser(
+        description="Factorial algorithm comparison (use --quick for fast iteration).",
+    )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help=(
+            "Small grid: urban_canyon + clear + critical, trajectories random_walk/linear/circular, "
+            f"{QUICK_DEFAULT_TRIALS} trials, {QUICK_DEFAULT_DURATION_S:.0f}s sim (override with --n-trials / --duration-s)."
+        ),
+    )
+    parser.add_argument(
+        "--no-full-factorial",
+        action="store_true",
+        help="Legacy compact mode (all patterns, single env) — not the same as --quick.",
+    )
+    parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Uniform trial count for every cell (overrides primary/secondary split unless --quick supplies default).",
+    )
+    parser.add_argument(
+        "--duration-s",
+        type=float,
+        default=None,
+        help="Simulated seconds per trial (default 30 full, 15 quick).",
+    )
+    parser.add_argument(
+        "--slim-baselines",
+        action="store_true",
+        help="Drop greedy + Q-learning to save ~2/7 runtime per cell.",
+    )
+    parser.add_argument(
+        "--ablation",
+        action="store_true",
+        help="Run appendix ablation study only (urban_canyon / clear / critical); then exit.",
+    )
+    parser.add_argument(
+        "--ablation-trials",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Trials per variant per pattern (default 50).",
+    )
+    parser.add_argument(
+        "--ablation-duration",
+        type=float,
+        default=30.0,
+        help="Simulated seconds per trial for ablation (default 30).",
+    )
+    parser.add_argument(
+        "--ablation-patterns",
+        type=str,
+        default="",
+        help="Comma-separated patterns (default: all five trajectories). Example: random_walk,linear,circular",
+    )
+    args = parser.parse_args()
+    if args.ablation:
+        ab_patterns: Optional[List[str]] = None
+        if args.ablation_patterns.strip():
+            ab_patterns = [p.strip() for p in args.ablation_patterns.split(",") if p.strip()]
+        run_ablation_study(
+            n_trials=args.ablation_trials,
+            duration_s=args.ablation_duration,
+            patterns=ab_patterns,
+        )
+        sys.exit(0)
+
+    results = run_comprehensive_comparison(
+        full_factorial=not args.no_full_factorial,
+        quick=args.quick,
+        n_trials=args.n_trials,
+        duration_s=args.duration_s,
+        slim_baselines=args.slim_baselines,
+    )

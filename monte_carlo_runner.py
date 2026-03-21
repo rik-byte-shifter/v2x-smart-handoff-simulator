@@ -27,6 +27,7 @@ MONTE_CARLO_ALGORITHM_CSV_LABELS: Dict[str, str] = {
     "greedy_rss": "Greedy RSS",
     "q_learning": "Q-Learning",
     "mpc_lookahead": "MPC lookahead (RSS + handoff penalty)",
+    "velocity_aided_rss": "Velocity-aided RSS (lookahead + TTT)",
 }
 
 
@@ -68,7 +69,7 @@ def apply_sim_environment(
 
 
 import main as sim_main
-from baselines import MPCLookaheadBaseline, RobustA3Baseline
+from baselines import MPCLookaheadBaseline, RobustA3Baseline, VelocityBiasedRSSBaseline
 from main import (
     FPS,
     HEIGHT,
@@ -150,44 +151,64 @@ def compute_external_aoi_peak(trial_results: Dict, packet_rate_hz: float = 10.0)
 
 
 class QLearningHandoff:
-    """Simple tabular Q-learning baseline policy."""
+    """
+    Tabular Q-learning with a richer discretized state (serving RSS, speed, distance to
+    strongest neighbor, RSS margin strongest−serving) and time-decaying ε-greedy exploration.
+    Reward stresses low internal AoI with handoff and outage penalties (aligned with
+    other baselines that share the same environment integrator).
+    """
 
     def __init__(
         self,
         towers: List[Tower],
-        alpha: float = 0.1,
-        gamma: float = 0.95,
-        epsilon: float = 0.1,
+        alpha: float = 0.12,
+        gamma: float = 0.96,
+        epsilon_start: float = 0.12,
+        epsilon_end: float = 0.02,
     ) -> None:
         self.towers = towers
         self.alpha = alpha
         self.gamma = gamma
-        self.epsilon = epsilon
-        self.q_table: Dict[Tuple[int, int, int], Dict[str, float]] = {}
+        self.epsilon_start = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.q_table: Dict[Tuple[int, int, int, int], Dict[str, float]] = {}
 
-    def _ensure_state(self, state: Tuple[int, int, int]) -> None:
+    def _ensure_state(self, state: Tuple[int, int, int, int]) -> None:
         if state not in self.q_table:
             self.q_table[state] = {t.name: 0.0 for t in self.towers}
 
-    def discretize(self, rss_dbm: float, speed_mps: float, distance_m: float) -> Tuple[int, int, int]:
-        rss_bin = int((rss_dbm + 140.0) // 10.0)
-        speed_bin = int(speed_mps // 5.0)
-        dist_bin = int(distance_m // 50.0)
-        return (rss_bin, speed_bin, dist_bin)
+    def discretize(
+        self,
+        rss_dbm: float,
+        speed_mps: float,
+        distance_m: float,
+        margin_db: float,
+    ) -> Tuple[int, int, int, int]:
+        rss_bin = int(max(-30, min(30, (rss_dbm + 130.0) // 5.0)))
+        speed_bin = int(min(25, speed_mps // 4.0))
+        dist_bin = int(min(40, distance_m // 40.0))
+        margin_bin = int(max(-8, min(20, margin_db // 4.0)))
+        return (rss_bin, speed_bin, dist_bin, margin_bin)
 
-    def choose_action(self, state: Tuple[int, int, int]) -> Tower:
+    def epsilon_for_step(self, frame_idx: int, total_frames: int) -> float:
+        if total_frames <= 1:
+            return self.epsilon_end
+        t = min(1.0, max(0.0, frame_idx / float(total_frames)))
+        return self.epsilon_start + (self.epsilon_end - self.epsilon_start) * t
+
+    def choose_action(self, state: Tuple[int, int, int, int], epsilon: float) -> Tower:
         self._ensure_state(state)
-        if random.random() < self.epsilon:
+        if random.random() < epsilon:
             return random.choice(self.towers)
         best_name = max(self.q_table[state], key=self.q_table[state].get)
         return next(t for t in self.towers if t.name == best_name)
 
     def update(
         self,
-        state: Tuple[int, int, int],
+        state: Tuple[int, int, int, int],
         action: Tower,
         reward: float,
-        next_state: Tuple[int, int, int],
+        next_state: Tuple[int, int, int, int],
     ) -> None:
         self._ensure_state(state)
         self._ensure_state(next_state)
@@ -373,6 +394,8 @@ class MonteCarloEvaluator:
             "a3_robust": "a3_robust",
             "mpc": "mpc_lookahead",
             "mpc_lookahead": "mpc_lookahead",
+            "velocity_aided": "velocity_aided_rss",
+            "velocity_aided_rss": "velocity_aided_rss",
         }
         key = algorithm.lower()
         return aliases.get(key, key)
@@ -486,6 +509,9 @@ class MonteCarloEvaluator:
 
             dt = 1.0 / FPS
             n_frames = int(duration_s * FPS)
+            if algorithm_key == "q_learning":
+                policy_state["ql_total_frames"] = n_frames
+                policy_state["ql_frame"] = 0
 
             sim.reset_monte_carlo_trial_state()
 
@@ -589,6 +615,7 @@ class MonteCarloEvaluator:
             "greedy_rss",
             "q_learning",
             "mpc_lookahead",
+            "velocity_aided_rss",
             "ab_no_survival",
             "ab_no_aoi",
             "ab_no_load",
@@ -611,6 +638,8 @@ class MonteCarloEvaluator:
             state["robust_a3"] = RobustA3Baseline()
         if algorithm_key == "mpc_lookahead":
             state["mpc"] = MPCLookaheadBaseline()
+        if algorithm_key == "velocity_aided_rss":
+            state["velocity_aided"] = VelocityBiasedRSSBaseline()
         return state
 
     def _execute_handoff(
@@ -675,25 +704,38 @@ class MonteCarloEvaluator:
                 self._execute_handoff(sim, chosen, "MPC")
             return
 
+        if algorithm_key == "velocity_aided_rss":
+            vb: VelocityBiasedRSSBaseline = policy_state["velocity_aided"]
+            chosen, did, _ = vb.decide(sim, measurements)
+            if did:
+                self._execute_handoff(sim, chosen, "VELAID")
+            return
+
         if algorithm_key == "q_learning":
             agent: QLearningHandoff = policy_state["agent"]
             speed_mps = (sim.ue_velocity[0] ** 2 + sim.ue_velocity[1] ** 2) ** 0.5
             serving = sim.current_tower
             serving_m = measurements[serving]
-            state = agent.discretize(serving_m.rss_dbm, speed_mps, serving_m.distance_m)
-            action = agent.choose_action(state)
+            strongest = max(sim.towers, key=lambda t: measurements[t].rss_dbm)
+            margin_db = measurements[strongest].rss_dbm - serving_m.rss_dbm
+            state = agent.discretize(serving_m.rss_dbm, speed_mps, serving_m.distance_m, margin_db)
+            policy_state["ql_frame"] = policy_state.get("ql_frame", 0) + 1
+            nt = max(1, int(policy_state.get("ql_total_frames", 1)))
+            eps = agent.epsilon_for_step(policy_state["ql_frame"], nt)
+            action = agent.choose_action(state, eps)
 
-            # AoI-aligned reward for fairer comparison with AoI-centric metrics.
             reward = -sim.aoi_age_s
-            reward -= 0.15 if action != serving else 0.0
-            reward -= 0.35 if measurements[action].rss_dbm < OUTAGE_RSS_THRESHOLD_DBM else 0.0
+            reward -= 0.12 if action != serving else 0.0
+            reward -= 0.40 if measurements[action].rss_dbm < OUTAGE_RSS_THRESHOLD_DBM else 0.0
 
             if action != serving:
                 self._execute_handoff(sim, action, "QLEARN")
 
             next_serving = sim.current_tower
             next_m = measurements[next_serving]
-            next_state = agent.discretize(next_m.rss_dbm, speed_mps, next_m.distance_m)
+            strongest_n = max(sim.towers, key=lambda t: measurements[t].rss_dbm)
+            margin_n = measurements[strongest_n].rss_dbm - next_m.rss_dbm
+            next_state = agent.discretize(next_m.rss_dbm, speed_mps, next_m.distance_m, margin_n)
             agent.update(state, action, reward, next_state)
             return
 

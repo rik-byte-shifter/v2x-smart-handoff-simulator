@@ -109,6 +109,8 @@ REPRODUCIBILITY_CONFIG: Dict[str, Any] = {
         "(urban_canyon × trajectories use primary; optional uniform n_trials= overrides all).",
         "Tower load = scheduled component + cross-traffic from per-tower invisible UE sessions (birth–death); see BACKGROUND_* in src/main.py.",
         "Monte Carlo uses CONFIG.monte_carlo_enable_small_scale_fading (Rician LOS / Rayleigh NLOS) via sim.enable_small_scale_fading_override; GUI uses CONFIG.enable_small_scale_fading unless override is set.",
+        "Baselines include velocity-aided RSS (lookahead + TTT), MPC (horizon 0.8 s, handoff cost 5 dB), and tabular Q-learning with richer state + decaying epsilon.",
+        "Statistical exports: statistical_tests.csv (all metrics); statistical_tests_primary_endpoints.csv (external AoI + churn + outage); Cliff's delta for discrete counts.",
     ],
 }
 

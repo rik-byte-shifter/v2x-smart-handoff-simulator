@@ -42,6 +42,8 @@ We pre-specify **external AoI** as our **primary outcome metric**: the time aver
 
 **Primary family (FWER across a pre-specified set):** `compare_algorithms.run_primary_tests` and `PRIMARY_ENDPOINTS` define a small family (e.g. external AoI, Proposed vs Robust A3+, three trajectories, fixed weather/profile matching the default plot filter); Holm correction applies **only across that family**, with results in `outputs/primary_family_tests.csv`. The full `statistical_tests.csv` grid is **exploratory** outside this family unless you expand `PRIMARY_ENDPOINTS`.
 
+**Paper-facing pairwise subset:** `outputs/statistical_tests_primary_endpoints.csv` contains the same pairwise comparisons as the full grid but **only** for external AoI (mean and peak), handoff count, ping-pong count, and outage time. Discrete count rows use **Cliff’s delta**; Cohen’s d is omitted (NaN) for those metrics. See `docs/ANALYSIS_PROTOCOL.md`.
+
 ---
 
 ## Why this satisfies reviewers

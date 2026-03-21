@@ -1,8 +1,12 @@
 """
-Genetic-algorithm search for semantic score weights (optional paper / appendix).
+Genetic-algorithm search for **utility weights** (legacy code: ``SEMANTIC_W_*`` in
+``src/main.py``). Optional for appendix / sensitivity only.
 
-Fitness uses the same Monte Carlo harness as the rest of the project, with
-``policy_weight_override`` so module defaults in ``src/main.py`` stay unchanged.
+Fitness uses the same Monte Carlo harness with ``policy_weight_override``. That
+optimizes a **composite score on this simulator**—it is not independent validation.
+For publication, prefer fixed weights from ``main.py`` / ``config_reproducibility.py``,
+or disclose a **held-out** scenario/seed protocol (nested evaluation) if you adopt
+tuned values; otherwise reviewers may flag simulator overfitting.
 
 Example:
   python semantic_weight_tuner.py --generations 5 --population 8 --trials-per-eval 4

@@ -14,7 +14,9 @@ You can paste this into a “Limitations,” “Simulation setup,” or “Discu
 
 Our evaluation uses a geometric 2D channel model with log-distance path loss, binary building shadowing, and heuristic moving-blocker attenuation. While this captures key V2X phenomena (blockage, Doppler, handoff triggers), it does not implement full 3GPP TR 38.901 channel modeling or map-based mobility. Consequently, our results demonstrate *algorithmic relative performance* under controlled conditions, not absolute field performance. Future work will validate against ns-3/Simu5G packet-level simulation and real-world V2X traces.
 
-**Optional extra sentence:** The implementation is discrete-time, with hysteresis and time-to-trigger–style handoffs; the proposed policy adds short-horizon predicted RSS and survival-style scoring (see `src/main.py`).
+**Optional extra sentence:** The implementation is discrete-time, with hysteresis and time-to-trigger–style handoffs; the proposed policy adds short-horizon predicted RSS and a connectivity-survival-style heuristic (see `src/main.py`).
+
+**Fading (GUI vs batch):** The interactive simulator defaults to **no** small-scale fading (`config.enable_small_scale_fading`); Monte Carlo / factorial evaluation defaults to **on** (`monte_carlo_enable_small_scale_fading` in `config.py`). Report both defaults in the methods section.
 
 ---
 

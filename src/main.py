@@ -79,6 +79,9 @@ TELEMETRY_SAMPLE_EVERY_N_FRAMES = 1
 TELEMETRY_MAX_ROWS = 50_000
 
 # Ablation/control knobs (used by evaluation scripts).
+# Paper wording: **urgency-aware composite utility** (survival-style lookahead term,
+# predicted RSS, synthetic load, projected AoI ratio). Identifier prefix ``SEMANTIC_W_*``
+# is historical; see docs/PAPER_POSITIONING.md.
 SEMANTIC_W_SURVIVAL = 1.00
 SEMANTIC_W_PREDICTED_RSS = 0.22
 SEMANTIC_W_LOAD = 0.60
@@ -869,6 +872,7 @@ class V2XSmartHandoffSimulator:
         return max(PACKET_SUCCESS_MIN_PROB, min(PACKET_SUCCESS_MAX_PROB, p))
 
     def evaluate_survival_score(self, tower: Tower, horizon_s: float = SURVIVAL_WINDOW_S) -> float:
+        """Short-horizon connectivity survival heuristic (RSS outage hazard product); not parametric survival analysis."""
         samples = max(1, int(horizon_s / SURVIVAL_DT_S))
         survival = 1.0
         rss_acc = 0.0

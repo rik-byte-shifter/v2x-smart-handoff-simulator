@@ -74,24 +74,23 @@ Two forecasting modes are available:
 - `velocity` mode: direct extrapolation from measured UE velocity.
 - `kalman` mode: alpha-beta style constant-velocity filtering and prediction.
 
-### Risk-Aware Survival Policy
+### Risk-Aware Lookahead (“Survival” Heuristic)
 
-- A survival score is evaluated per tower over a future window.
+- A **connectivity survival heuristic** is evaluated per tower over a future window (not Cox/Kaplan–Meier survival analysis).
 - At each step in the window, outage probability is estimated from predicted RSS.
-- The algorithm prefers the tower with the highest expected connectivity survival (with RSS as a tie-strength term).
+- The algorithm prefers the tower with the highest heuristic score (with RSS as a tie-strength term).
 - This can intentionally pick a currently weaker tower when it is predicted to remain stable while a stronger one is about to be blocked.
 
-### AoI-Driven Semantic Cognitive Handoff
+### Urgency-Aware Composite Handoff (implementation: “semantic” score in code)
 
-- Data urgency profile can be switched between:
-  - `critical` (strict freshness target)
-  - `standard` (relaxed freshness target)
+- Paper wording: **urgency-aware composite utility** (not information-theoretic semantic communication).
+- Data urgency profile: `critical` (strict freshness target) vs `standard` (relaxed).
 - For each candidate tower, the policy estimates:
-  - predicted RSS/survival
+  - predicted RSS / connectivity-survival heuristic
   - predicted tower congestion (load)—**synthetic** load trace in the simulator, not measured congestion
   - projected Age of Information ratio
   - handoff latency spike cost
-- Final tower choice is a semantic score balancing urgency vs quality, not RSS alone.
+- Final tower choice is a weighted composite score, not RSS alone.
 
 ### Cooperative V2V Relay Fallback
 

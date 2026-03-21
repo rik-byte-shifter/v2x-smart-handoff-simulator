@@ -17,6 +17,7 @@ def compare_algorithms(
         ("A3 (3GPP)", "a3_3gpp"),
         ("Robust A3+", "a3_robust"),
         ("MPC lookahead", "mpc_lookahead"),
+        ("Velocity-aided RSS", "velocity_aided_rss"),
         ("Greedy RSS", "greedy_rss"),
         ("Q-Learning", "q_learning"),
     ]
@@ -51,9 +52,15 @@ def compare_algorithms(
 
     plot_cdf_comparison(
         results_list,
+        metric="avg_aoi_external",
+        output_path=str(output_dir / f"baseline_cdf_avg_aoi_external_{stamp}.png"),
+        title="External AoI (primary) CDF — Baselines",
+    )
+    plot_cdf_comparison(
+        results_list,
         metric="avg_aoi",
-        output_path=str(output_dir / f"baseline_cdf_avg_aoi_{stamp}.png"),
-        title="AoI CDF Comparison Across Baselines",
+        output_path=str(output_dir / f"baseline_cdf_avg_aoi_internal_{stamp}.png"),
+        title="Internal AoI (exploratory) CDF — Baselines",
     )
     plot_boxplot_comparison(
         results_list,
@@ -67,13 +74,13 @@ def compare_algorithms(
         n_samples=1200,
     )
 
-    print("\nAlgorithm         Avg AoI (s)   95% CI                Handoffs   Outage (s)")
+    print("\nAlgorithm         Ext.AoI (s)  95% CI                Handoffs   Outage (s)")
     print("-" * 76)
     for name, stats in summary.items():
-        ci = (stats["avg_aoi_ci_low"], stats["avg_aoi_ci_high"])
+        ci = (stats["avg_aoi_external_ci_low"], stats["avg_aoi_external_ci_high"])
         print(
             f"{name:<16} "
-            f"{stats['avg_aoi_mean']:<12.4f} "
+            f"{stats['avg_aoi_external_mean']:<12.4f} "
             f"[{ci[0]:.4f}, {ci[1]:.4f}]   "
             f"{stats['handoff_count_mean']:<8.2f} "
             f"{stats['outage_time_s_mean']:.3f}"

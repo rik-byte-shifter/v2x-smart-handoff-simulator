@@ -4,8 +4,8 @@ A simulation framework for studying proactive handoff algorithms in V2X networks
 
 ## Research Contributions
 
-- Predictive handoff with survival-aware scoring
-- AoI-driven semantic utility optimization
+- Predictive handoff with a **short-horizon connectivity survival heuristic** (RSS-based lookahead; not parametric survival analysis)
+- **Urgency-aware composite utility** (predicted RSS, synthetic load, projected AoI ratio); see `docs/PAPER_POSITIONING.md` for reviewer-facing wording
 - V2V relay fallback for outage resilience
 
 ## Citation
@@ -29,7 +29,7 @@ This is a **simulation study** using a **2D geometric channel model**. Results s
 - Smart handoff with hysteresis + hold timer
 - Predictive handoff (velocity and Kalman options)
 - Risk-aware survival handoff using **predicted UE motion**, **predicted blocker positions with additive Gaussian noise** (noisy future-state geometry), and **near-future RSS**—not a calibrated network digital twin
-- AoI-driven semantic handoff (`critical` vs `standard` packet urgency)
+- Urgency-aware handoff (`critical` vs `standard` packet profiles; composite score, not information-theoretic semantic communication)
 - Predicted tower congestion-aware decision scoring
 - Handoff latency spike cost modeling (switches are no longer "free")
 - V2V relay fallback path for near-outage moments
@@ -58,7 +58,7 @@ The simulator contains three layers:
 
 See `docs/ARCHITECTURE.md` for details.
 
-**Paper / evaluation:** Pre-specified **primary endpoint = external AoI** (independent RSS-threshold packet process); secondary = handoffs, ping-pong, outage, etc. See **`docs/PRIMARY_AND_SECONDARY_ENDPOINTS.md`** for wording templates.
+**Paper / evaluation:** Pre-specified **primary endpoint = external AoI** (independent RSS-threshold packet process); secondary = handoffs, ping-pong, outage, etc. See **`docs/PRIMARY_AND_SECONDARY_ENDPOINTS.md`**, **`docs/ANALYSIS_PROTOCOL.md`** (primary vs exploratory), and **`docs/PAPER_POSITIONING.md`** (terminology, fading, `random_walk` caveat).
 
 ## Controls
 
@@ -80,7 +80,7 @@ See `docs/ARCHITECTURE.md` for details.
 
 ## Reproducibility (paper)
 
-Frozen **software pins, seeds, channel/handoff constants, and ablation weight snapshots** for an appendix or supplementary table: **`config_reproducibility.py`** (`REPRODUCIBILITY_CONFIG`). Update the recorded Python version with `python --version` before submission.
+Frozen **software pins, seeds, channel/handoff constants, and ablation weight snapshots** for an appendix or supplementary table: **`config_reproducibility.py`** (`REPRODUCIBILITY_CONFIG`). For exact dependency versions from a machine that ran the experiments, use **`requirements-lock.txt`** (`pip freeze`). Update the recorded Python version with `python --version` before submission.
 
 ## Install
 
@@ -90,6 +90,8 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+**Tests (optional):** `pip install -r requirements-dev.txt` then `python -m pytest tests/`.
+
 ## Run
 
 ```bash
@@ -98,16 +100,38 @@ python src/main.py
 
 ## Factorial evaluation (`compare_algorithms.py`)
 
-`python compare_algorithms.py` runs a **full factorial** over map scenarios (`baseline`, `urban_canyon`, `intersection`), **weather** (`clear`, `rain`, `fog`, `storm`), **packet profile** (`critical`, `standard`), and **trajectory** (`random_walk`, `linear`, `circular`). **Urban canyon** cells use **`PRIMARY_TRIALS`** (100) per algorithm run for statistical power on the pre-specified primary contrasts; **baseline** and **intersection** cells use **`SECONDARY_TRIALS`** (25). Pass `n_trials=` to `run_comprehensive_comparison()` to force one count for every cell (e.g. quick tests).
+**Runtime:** The default **full** factorial is **120 cells** (5 trajectories × 3 scenarios × 4 weathers × 2 profiles) × **7 algorithms** × up to **100 trials** × **30 s** simulated time × 60 FPS — expect **many hours**. For development, use:
 
-Outputs include **`outputs/subgroup_proposed_aoi.csv`** (proposed AoI per trajectory), **`outputs/subgroup_analysis_table.csv`** (paper-style subgroup table: Scenario / Weather / Profile, **Proposed vs A3** mean AoI aggregated over the three trajectories, **Improvement** = \((\mathrm{A3}-\mathrm{Proposed})/\mathrm{A3}\) as percent with **↓**), **`outputs/targeted_proposed_vs_a3_tests.csv`** (pre-specified **Proposed vs A3** tests only—trial-level, trajectories pooled—aligned with that subgroup table), **`outputs/primary_family_tests.csv`** (pre-specified **primary endpoint family**: external AoI, Proposed vs Robust A3+, three trajectories, **Holm** across that set only), **`outputs/comparison_factorial/…`** (per-cell CDF/boxplots), and **`outputs/statistical_tests.csv`** (all pairwise tests **within** each pattern × environment cell; interpret as exploratory except where covered by the primary family). Summary boxplots in **`outputs/comparison_all_metrics/`** use **urban_canyon / clear / critical** by default so figures are not mixed across all 24 environment cells.
+```bash
+python compare_algorithms.py --quick
+```
+
+**Quick mode** runs only **3** trajectories × **1** environment (`urban_canyon`, `clear`, `critical`) × **20** trials × **15 s** sim (~100×+ fewer frame-equivalents than the full grid). Optional: `--slim-baselines` (drops greedy + Q-learning), `--n-trials 8`, `--duration-s 10`.
+
+`python compare_algorithms.py` (no flags) runs the **full factorial** over map scenarios (`baseline`, `urban_canyon`, `intersection`), **weather** (`clear`, `rain`, `fog`, `storm`), **packet profile** (`critical`, `standard`), and **trajectory** patterns in `compare_algorithms.TRAJECTORY_PATTERNS`. **Pre-specified primary inference** uses a subset of trajectories; erratic patterns such as `random_walk` may interact differently with policies—discuss in paper if contrasts differ (see `docs/PAPER_POSITIONING.md`). **Urban canyon** cells use **`PRIMARY_TRIALS`** (100) per algorithm; **baseline** and **intersection** use **`SECONDARY_TRIALS`** (25). Pass `n_trials=` to `run_comprehensive_comparison()` to force one count for every cell.
+
+Outputs include **`outputs/subgroup_proposed_aoi.csv`** (per-trajectory proposed metrics; **external AoI** columns are primary), **`outputs/subgroup_analysis_table.csv`** (**primary:** Proposed vs A3 **external** AoI mean over trajectories + **Improvement_External**; **exploratory:** internal AoI columns), **`outputs/statistical_tests.csv`** (all metrics: external + internal AoI, handoffs, etc.; **Cohen’s d omitted for discrete counts**, **Cliff’s delta** reported), **`outputs/statistical_tests_primary_endpoints.csv`** (same grid, **paper-facing subset**: external AoI + churn + outage only), **`outputs/targeted_proposed_vs_a3_tests.csv`** (Proposed vs A3; metrics include external AoI first), **`outputs/primary_family_tests.csv`** (pre-specified **primary inferential family**: external AoI, Proposed vs Robust A3+, three trajectories, **Holm** only across that set), **`outputs/comparison_factorial/…`** (CDFs/boxplots including **avg_aoi_external**), and summary boxplots in **`outputs/comparison_all_metrics/`** filtered to **urban_canyon / clear / critical** by default.
+
+**Sensitivity (appendix):** `python sensitivity_sweep.py` → `outputs/sensitivity_sweep_summary.csv` (one-at-a-time channel / utility knobs).
+
+**Ablation figures (appendix):**
+```bash
+python compare_algorithms.py --ablation
+```
+Defaults: 50 trials × 30 s × five trajectories (long). Faster appendix pass:
+```bash
+python compare_algorithms.py --ablation --ablation-trials 20 --ablation-duration 15 --ablation-patterns random_walk,linear,circular
+```
+Writes `outputs/ablation_<pattern>/` (CDFs + boxplots), `outputs/statistical_tests_ablation*.csv`, `outputs/ablation_all_metrics/`.
 
 Pass `full_factorial=False` to `run_comprehensive_comparison()` for a quick three-pattern run with default simulator weather/profile (still uses primary trial count on urban_canyon). Pass `n_trials=25` for a uniform low count everywhere.
 
 ## Technical Notes
 
 - **Robust A3+ baseline** (`robust_a3` / `a3+`): same TTT/hysteresis structure as A3, but candidate ranking uses **load-adjusted RSS** (`RSS − load_offset × load`) vs raw serving RSS; stronger than plain greedy RSS.
-- **MPC lookahead baseline** (`mpc` / `mpc_lookahead`): sums predicted RSS over a short horizon (default 1 s, step 0.1 s) using `get_predicted_position` and `calculate_measurement` with `future_s`; subtracts a one-time **handoff cost** (dB) at step 0 when changing cells.
+- **MPC lookahead baseline** (`mpc` / `mpc_lookahead`): sums predicted RSS over a short horizon (**default 0.8 s** aligned with `PREDICT_LOOKAHEAD_S`, step 0.1 s) using `get_predicted_position` and `calculate_measurement` with `future_s`; subtracts a one-time **handoff cost** (default **5 dB**) at step 0 when changing cells.
+- **Velocity-aided RSS baseline** (`velocity_aided`): lookahead RSS ranking + hysteresis/TTT (literature-style mobility hint without the full proposed composite score).
+- **GUI vs Monte Carlo fading:** interactive runs default to **no** small-scale fading (`config.enable_small_scale_fading`); headless Monte Carlo defaults to **Rician/Rayleigh on** (`monte_carlo_enable_small_scale_fading`). State both in paper methods—see `docs/PAPER_POSITIONING.md`.
 - Frequency: 5.9 GHz (typical ITS band usage context)
 - RSS model: log-distance path loss approximation
 - Shadowing: fixed 20 dB attenuation when LOS intersects a building rectangle

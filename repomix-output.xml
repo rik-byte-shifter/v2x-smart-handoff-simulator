@@ -46,19 +46,718 @@ compare_algorithms.py
 compare_baselines.py
 config_reproducibility.py
 config.py
+docs/ANALYSIS_PROTOCOL.md
 docs/ARCHITECTURE.md
+docs/COMPLEXITY_AND_OVERHEAD.md
+docs/PAPER_POSITIONING.md
 docs/PRIMARY_AND_SECONDARY_ENDPOINTS.md
 docs/SIMULATION_FIDELITY_AND_LIMITATIONS.md
 monte_carlo_runner.py
 plotting_utils.py
 README.md
+requirements-dev.txt
+requirements-lock.txt
 requirements.txt
+semantic_weight_tuner.py
+sensitivity_sweep.py
 src/main.py
 test_handoff.py
+tests/test_monte_carlo_regression.py
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="docs/ANALYSIS_PROTOCOL.md">
+# Pre-specified analysis protocol (paper / supplement)
+
+This file records **what is primary vs exploratory** so results align with the code in `compare_algorithms.py` and `plotting_utils.py`.
+
+## Primary outcome metric
+
+- **External AoI (mean):** `avg_aoi_external` per trial; aggregate mean `avg_aoi_external_mean` in Monte Carlo summaries.
+- Definition: independent packet process at fixed rate; success iff serving RSS > outage threshold (`compute_external_aoi` in `monte_carlo_runner.py`). Not the simulator’s internal AoI integrator.
+
+## Pre-specified primary **inferential family** (FWER control)
+
+- **Tests:** Proposed (`my_algorithm`) vs Robust A3+ (`robust_a3`) on **external AoI**, exactly the tuples in `compare_algorithms.PRIMARY_ENDPOINTS`.
+- **Environment:** `urban_canyon`, weather `clear`, packet profile `critical` (see `PRIMARY_ENDPOINT_ENV`).
+- **Trajectories:** `random_walk`, `linear`, `circular` (as listed in `PRIMARY_ENDPOINTS`).
+- **Multiple comparison correction:** Holm–Bonferroni **only** across those tests; results in `outputs/primary_family_tests.csv`.
+
+## Secondary metrics
+
+- Handoff count, ping-pong count, outage time (serving RSS below threshold).
+- Internal AoI (`avg_aoi`, `peak_aoi`): **exploratory** only (shared environment mechanics with some policies).
+
+## Exploratory analyses (hypothesis-generating unless promoted)
+
+- Full pairwise grid in `outputs/statistical_tests.csv` (all metrics including internal AoI).
+- Subgroup tables pooling trajectories beyond the primary family.
+- Any contrast not listed in `PRIMARY_ENDPOINTS`.
+
+## Paper-facing statistical export subset
+
+- `outputs/statistical_tests_primary_endpoints.csv`: rows where `metric` is external AoI, peak external AoI, handoffs, ping-pong, or outage (see `plotting_utils.PRIMARY_STATISTICAL_METRICS`).
+
+## Effect sizes
+
+- Continuous metrics: Cohen’s d (reported with mean difference and bootstrap CI).
+- Discrete counts: **Cliff’s delta** (Cohen’s d omitted / NaN in CSV to avoid misleading huge values when variances are small).
+
+## α level
+
+- 0.05 for corrected primary family; exploratory contrasts reported without study-wide FWER claim unless otherwise noted.
+</file>
+
+<file path="docs/COMPLEXITY_AND_OVERHEAD.md">
+# Computational complexity (decision-time sketch)
+
+Rough order per simulation frame for the **proposed** policy (`update_handoff_logic`):
+
+- **Measurements:** O(N towers) path-loss / shadowing checks; building LOS is O(N × B) segment tests (B = buildings); moving blockers add O(N × K) link–disk tests (K = blockers).
+- **Lookahead / survival:** For each tower, short-horizon samples call `calculate_measurement` again → O(N × S) with S ≈ survival_window / survival_dt steps.
+- **Baselines:** Greedy / A3-style are O(N); MPC is O(N × horizon_steps); velocity-aided uses a few lookahead RSS evaluations per tower per step.
+
+The pygame loop targets **60 FPS** for visualization; headless Monte Carlo uses the same per-frame logic with `CONFIG.headless_monte_carlo`. Real RRC handover timelines are **orders of magnitude slower** than one frame; the simulator is a **policy algorithm testbed**, not a real-time RRC emulator. For a paper, add one sentence: decisions could be executed on a slower control loop (e.g. 10–100 ms) with subsampled kinematics if ported to a real stack.
+</file>
+
+<file path="docs/PAPER_POSITIONING.md">
+# Paper positioning and reviewer-facing language
+
+## Simulation scope
+
+This repository supports a **controlled geometric simulation study** of handoff policies. Claims should **not** imply calibrated 3GPP field performance or a validated digital twin.
+
+## Vocabulary
+
+| Avoid alone | Prefer |
+|-------------|--------|
+| “Semantic handoff” (information-theoretic connotation) | **Urgency-aware composite utility** or **AoI- and load-aware handoff score** |
+| “Survival score” (statistical survival analysis) | **Short-horizon connectivity survival heuristic** or **risk-aware lookahead score** |
+| “Semantic weights” in prose | **Utility weights** (code identifiers `SEMANTIC_W_*` are legacy names) |
+
+## Trajectory caveat: `random_walk`
+
+Highly erratic synthetic motion can favor reactive strongest-cell policies under some cells; **pre-specified primary inference** uses a fixed set of trajectories and environment (`PRIMARY_ENDPOINTS`). If external AoI is flat or negative vs A3 on `random_walk` in some cells, report it as a **boundary condition** or **regime limitation**, not as a hidden failure—see factorial outputs and discussion text.
+
+## Fading and GUI vs Monte Carlo
+
+- **Interactive GUI default:** small-scale fading **off** (`config.CONFIG.enable_small_scale_fading`).
+- **Default batch / Monte Carlo:** fading **on** (`CONFIG.monte_carlo_enable_small_scale_fading = True`) unless you change `config.py`.
+
+State this explicitly in Methods so reviewers do not see a contradiction.
+
+## Future work (high impact, not in this repo)
+
+- **ns-3 / Simu5G** or another standard packet simulator with the same policy API.
+- **Trace-driven mobility** (SUMO, open vehicular traces).
+- **Formal models:** AoI with switching costs in a simplified Markov/renewal framework (structural results or bounds)—a separate theory contribution.
+
+## Weight tuning and `semantic_weight_tuner.py`
+
+- Default weights live in `src/main.py` (`SEMANTIC_W_*`).
+- The optional genetic tuner searches weights against a **composite fitness** on the same simulator—treat as **hyperparameter search**, not independent validation.
+- For publication: report defaults used in main experiments; if tuner outputs are used, disclose tuning protocol and use a **held-out** scenario seed set or nested evaluation to reduce overfitting to the simulator (tuner does not do this automatically).
+</file>
+
+<file path="requirements-dev.txt">
+# Development / CI (optional): pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=7.4.0
+</file>
+
+<file path="requirements-lock.txt">
+contourpy==1.3.3
+cycler==0.12.1
+fonttools==4.62.1
+kiwisolver==1.5.0
+matplotlib==3.10.8
+numpy==2.4.3
+packaging==26.0
+pandas==3.0.1
+pillow==12.1.1
+pygame==2.6.1
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+scipy==1.17.1
+seaborn==0.13.2
+six==1.17.0
+tzdata==2025.3
+</file>
+
+<file path="sensitivity_sweep.py">
+"""
+One-at-a-time sensitivity of the **primary metric** (external AoI) to selected channel
+and policy hyperparameters. Intended for appendix figures / robustness paragraphs.
+
+Usage:
+  python sensitivity_sweep.py
+  python sensitivity_sweep.py --trials 12 --pattern linear
+
+Restores ``src.main`` globals after each sweep arm.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Tuple
+
+_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "src"))
+
+import monte_carlo_runner as mcr  # noqa: E402
+from monte_carlo_runner import MonteCarloEvaluator  # noqa: E402
+
+import main as sim_main  # noqa: E402
+
+
+def _run_cell(
+    label: str,
+    apply_patch: Callable[[], None],
+    restore: Callable[[], None],
+    n_trials: int,
+    pattern: str,
+    base_seed: int,
+) -> Dict[str, Any]:
+    apply_patch()
+    try:
+        ev = MonteCarloEvaluator(base_scenario="urban_canyon")
+        prop = ev.run_monte_carlo(
+            n_trials=n_trials,
+            duration_s=30.0,
+            trajectory_pattern=pattern,
+            algorithm="my_algorithm",
+            base_seed=base_seed,
+            scenario="urban_canyon",
+            weather_mode="clear",
+            packet_profile="critical",
+        )
+        a3 = ev.run_monte_carlo(
+            n_trials=n_trials,
+            duration_s=30.0,
+            trajectory_pattern=pattern,
+            algorithm="a3",
+            base_seed=base_seed + 10_000,
+            scenario="urban_canyon",
+            weather_mode="clear",
+            packet_profile="critical",
+        )
+        return {
+            "label": label,
+            "proposed_external_aoi_mean": prop["avg_aoi_external_mean"],
+            "a3_external_aoi_mean": a3["avg_aoi_external_mean"],
+        }
+    finally:
+        restore()
+
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--trials", type=int, default=10, help="Trials per arm (keep small for quick runs)")
+    p.add_argument("--pattern", type=str, default="linear", help="Trajectory pattern")
+    p.add_argument("--seed", type=int, default=42)
+    args = p.parse_args()
+
+    # Snapshot originals
+    eta0 = sim_main.PATH_LOSS_EXPONENT
+    ghost0 = sim_main.GHOST_NOISE_M
+    out0 = sim_main.OUTAGE_RSS_THRESHOLD_DBM
+    ws0 = sim_main.SEMANTIC_W_SURVIVAL
+    wl0 = sim_main.SEMANTIC_W_LOAD
+    cfg_orig = mcr.CONFIG
+    rows: List[Dict[str, Any]] = []
+
+    arms: List[Tuple[str, Callable[[], None], Callable[[], None]]] = [
+        (
+            "baseline_defaults",
+            lambda: None,
+            lambda: None,
+        ),
+        (
+            "path_loss_eta=2.0",
+            lambda: setattr(sim_main, "PATH_LOSS_EXPONENT", 2.0),
+            lambda: setattr(sim_main, "PATH_LOSS_EXPONENT", eta0),
+        ),
+        (
+            "path_loss_eta=2.8",
+            lambda: setattr(sim_main, "PATH_LOSS_EXPONENT", 2.8),
+            lambda: setattr(sim_main, "PATH_LOSS_EXPONENT", eta0),
+        ),
+        (
+            "ghost_noise_m=0.9",
+            lambda: setattr(sim_main, "GHOST_NOISE_M", 0.9),
+            lambda: setattr(sim_main, "GHOST_NOISE_M", ghost0),
+        ),
+        (
+            "ghost_noise_m=3.5",
+            lambda: setattr(sim_main, "GHOST_NOISE_M", 3.5),
+            lambda: setattr(sim_main, "GHOST_NOISE_M", ghost0),
+        ),
+        (
+            "outage_threshold=-90dBm",
+            lambda: setattr(sim_main, "OUTAGE_RSS_THRESHOLD_DBM", -90.0),
+            lambda: setattr(sim_main, "OUTAGE_RSS_THRESHOLD_DBM", out0),
+        ),
+        (
+            "outage_threshold=-100dBm",
+            lambda: setattr(sim_main, "OUTAGE_RSS_THRESHOLD_DBM", -100.0),
+            lambda: setattr(sim_main, "OUTAGE_RSS_THRESHOLD_DBM", out0),
+        ),
+        (
+            "w_survival=0.5",
+            lambda: setattr(sim_main, "SEMANTIC_W_SURVIVAL", 0.5),
+            lambda: setattr(sim_main, "SEMANTIC_W_SURVIVAL", ws0),
+        ),
+        (
+            "w_load=0.3",
+            lambda: setattr(sim_main, "SEMANTIC_W_LOAD", 0.3),
+            lambda: setattr(sim_main, "SEMANTIC_W_LOAD", wl0),
+        ),
+        (
+            "mc_fading_off",
+            lambda: setattr(mcr, "CONFIG", replace(cfg_orig, monte_carlo_enable_small_scale_fading=False)),
+            lambda: setattr(mcr, "CONFIG", cfg_orig),
+        ),
+    ]
+
+    print("label,proposed_ext_aoi,a3_ext_aoi")
+    for label, apply_p, restore_p in arms:
+        row = _run_cell(label, apply_p, restore_p, args.trials, args.pattern, args.seed)
+        rows.append(row)
+        print(
+            f"{row['label']},{row['proposed_external_aoi_mean']:.6f},{row['a3_external_aoi_mean']:.6f}"
+        )
+
+    out = Path("outputs") / "sensitivity_sweep_summary.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    import csv
+
+    with out.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+    print(f"Wrote {out}")
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="tests/test_monte_carlo_regression.py">
+"""
+Light regression tests: small n, short horizon, fixed seeds.
+Ensures Monte Carlo harness and new baselines stay runnable headless.
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+from pathlib import Path
+
+import pytest
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "src"))
+
+from monte_carlo_runner import MonteCarloEvaluator, compute_external_aoi  # noqa: E402
+
+
+@pytest.fixture
+def evaluator() -> MonteCarloEvaluator:
+    return MonteCarloEvaluator(base_scenario="urban_canyon")
+
+
+def test_compute_external_aoi_monotone(evaluator: MonteCarloEvaluator) -> None:
+    r = evaluator.run_single_trial(
+        trial_id=0,
+        duration_s=2.0,
+        trajectory_pattern="linear",
+        algorithm="my_algorithm",
+        seed=999,
+        scenario="urban_canyon",
+        weather_mode="clear",
+        packet_profile="critical",
+    )
+    ext = compute_external_aoi(r)
+    assert math.isfinite(ext)
+    assert ext >= 0.0
+    assert "avg_aoi_external" in r
+    assert math.isfinite(r["avg_aoi_external"])
+
+
+@pytest.mark.parametrize("algo", ["my_algorithm", "a3", "velocity_aided", "qlearning", "mpc"])
+def test_baseline_runs_finite_external_aoi(evaluator: MonteCarloEvaluator, algo: str) -> None:
+    r = evaluator.run_single_trial(
+        trial_id=0,
+        duration_s=2.0,
+        trajectory_pattern="linear",
+        algorithm=algo,
+        seed=1001,
+        scenario="urban_canyon",
+        weather_mode="clear",
+        packet_profile="critical",
+    )
+    assert math.isfinite(r["avg_aoi_external"])
+    assert math.isfinite(r["handoff_count"])
+
+
+def test_two_trial_regression_snapshot(evaluator: MonteCarloEvaluator) -> None:
+    """Loose bounds so minor floating changes do not flake; catches gross breakage."""
+    stats = evaluator.run_monte_carlo(
+        n_trials=2,
+        duration_s=3.0,
+        trajectory_pattern="linear",
+        algorithm="my_algorithm",
+        base_seed=424242,
+        scenario="urban_canyon",
+        weather_mode="clear",
+        packet_profile="critical",
+    )
+    m = stats["avg_aoi_external_mean"]
+    assert 0.0 <= m < 5.0, f"unexpected external AoI mean {m}"
+</file>
+
+<file path="docs/PRIMARY_AND_SECONDARY_ENDPOINTS.md">
+# Pre-specified primary and secondary endpoints (paper text)
+
+Use this block (adapt section numbers) in your **Methods / Evaluation** or **Experimental Design** section so reviewers see a **single primary outcome** and no “fishing” across metrics.
+
+---
+
+## Markdown version
+
+**Primary and secondary outcomes**
+
+We **pre-specify *external Age of Information (AoI)*** as our **primary endpoint**. External AoI is the time-averaged instantaneous age, under an **independent packet process** that does not use the handoff policy’s semantic weights or internal AoI integrator: packets arrive at a fixed rate; each scheduled reception succeeds if and only if the **serving RSS** exceeds a fixed outage threshold (same physical layer geometry as the simulator). Lower external AoI is better. Implementation: `compute_external_aoi()` in `monte_carlo_runner.py` (trial-level mean over the Monte Carlo window; default packet rate 10 Hz unless stated).
+
+**Note on primary family:** External AoI is the primary **metric** (the outcome we emphasize in conclusions). That is not the same thing as the pre-specified primary **inference family** in code: `compare_algorithms.PRIMARY_ENDPOINTS` fixes a *small set of hypothesis tests* on that metric (e.g. external AoI, Proposed vs Robust A3+, three trajectories, one environment cell). **Holm–Bonferroni** in `outputs/primary_family_tests.csv` applies **only across that family**. Other contrasts—including the full pairwise grid in `statistical_tests.csv` and the separate **Proposed vs A3** targeted table—are **secondary or exploratory** unless you explicitly add them to `PRIMARY_ENDPOINTS`.
+
+**Secondary endpoints** (reported for context, not used to change the primary conclusion without disclosure):
+
+- **Handoff count** and **ping-pong count** (network churn / stability).
+- **Outage time** (fraction of time below RSS threshold on the serving link).
+- **Internal (simulator) AoI** — the integrated AoI state used inside the environment; we report it as **exploratory** because it shares mechanisms with some policies and is not our primary inferential target.
+
+**Exploratory analyses** may include peak AoI, average RSS, or subgroup tables (e.g. Proposed vs A3 by scenario); these are **hypothesis-generating** unless pre-specified in a protocol addendum.
+
+---
+
+## Short version (plain paragraph)
+
+We pre-specify **external AoI** as our **primary outcome metric**: the time average of instantaneous age under an independent packet process (fixed packet rate; reception succeeds if and only if serving RSS exceeds a fixed outage threshold). That process does not use the handoff policy’s semantic weights or the simulator’s internal AoI integrator. **Secondary metrics** include handoff count, ping-pong count, and outage time. We report **internal AoI** only as exploratory, since it is coupled to the same environment dynamics as some policies. Primary conclusions should be framed on **external AoI** unless an analysis is explicitly labelled exploratory.
+
+---
+
+## Alignment with code
+
+| Endpoint            | Code / output |
+|---------------------|----------------|
+| Primary: external AoI (mean) | `compute_external_aoi()`, trial field `avg_aoi_external`, Monte Carlo `avg_aoi_external_mean` |
+| Primary (peak, optional)     | `peak_aoi_external` |
+| Secondary: handoffs / ping-pong | `handoff_count`, `ping_pong_count` per trial |
+| Secondary: outage            | `outage_time_s` |
+| Exploratory: internal AoI    | `avg_aoi`, `peak_aoi` |
+
+**Targeted inference (Proposed vs A3):** `plotting_utils.test_proposed_vs_a3` and `run_targeted_proposed_vs_a3_all_cells` produce `outputs/targeted_proposed_vs_a3_tests.csv`—trial-level tests **pooled across trajectory patterns** per (scenario, weather, profile), aligned with the subgroup improvement table (not the all-pairwise `statistical_tests.csv`).
+
+**Primary family (FWER across a pre-specified set):** `compare_algorithms.run_primary_tests` and `PRIMARY_ENDPOINTS` define a small family (e.g. external AoI, Proposed vs Robust A3+, three trajectories, fixed weather/profile matching the default plot filter); Holm correction applies **only across that family**, with results in `outputs/primary_family_tests.csv`. The full `statistical_tests.csv` grid is **exploratory** outside this family unless you expand `PRIMARY_ENDPOINTS`.
+
+**Paper-facing pairwise subset:** `outputs/statistical_tests_primary_endpoints.csv` contains the same pairwise comparisons as the full grid but **only** for external AoI (mean and peak), handoff count, ping-pong count, and outage time. Discrete count rows use **Cliff’s delta**; Cohen’s d is omitted (NaN) for those metrics. See `docs/ANALYSIS_PROTOCOL.md`.
+
+---
+
+## Why this satisfies reviewers
+
+- **One primary endpoint** reduces the appearance of p-hacking across many metrics.
+- **External AoI** is defined without the policy’s semantic objective, improving separation from the proposed algorithm’s internal loss.
+- No new experiments are required—only **clear writing** and **consistent emphasis** in abstract, conclusion, and figures (e.g. lead with external AoI in the main comparison figure).
+</file>
+
+<file path="docs/SIMULATION_FIDELITY_AND_LIMITATIONS.md">
+# Simulation fidelity, scope, and limitations
+
+## Purpose of this document
+
+This document describes **what the V2X Smart Handoff Simulator (research edition) models**, lists **channel and evaluation parameters** that match the code, and states **limitations** so paper claims stay aligned with implementation. Use the boilerplate below in *Limitations*, *Simulation setup*, or *Discussion*; it is not internal author notes.
+
+The study is a **controlled geometric simulation** (explicit, reproducible rules)—**not** a claim about field V2X performance. Wording fits titles and abstracts that say **“simulated.”**
+
+---
+
+## Wording for papers or reports (plain text)
+
+You can paste this into a “Limitations,” “Simulation setup,” or “Discussion” subsection:
+
+Our evaluation uses a geometric 2D channel model with log-distance path loss, binary building shadowing, and heuristic moving-blocker attenuation. While this captures key V2X phenomena (blockage, Doppler, handoff triggers), it does not implement full 3GPP TR 38.901 channel modeling or map-based mobility. Consequently, our results demonstrate *algorithmic relative performance* under controlled conditions, not absolute field performance. Future work will validate against ns-3/Simu5G packet-level simulation and real-world V2X traces.
+
+**Optional extra sentence:** The implementation is discrete-time, with hysteresis and time-to-trigger–style handoffs; the proposed policy adds short-horizon predicted RSS and a connectivity-survival-style heuristic (see `src/main.py`).
+
+**Fading (GUI vs batch):** The interactive simulator defaults to **no** small-scale fading (`config.enable_small_scale_fading`); Monte Carlo / factorial evaluation defaults to **on** (`monte_carlo_enable_small_scale_fading` in `config.py`). Report both defaults in the methods section.
+
+---
+
+## One-sentence positioning (abstract / intro)
+
+We evaluate the proposed handoff policy in a **simulated** vehicular-style network with geometric blockage and a log-distance channel; results characterize **relative** algorithmic behavior under controlled scenarios, not calibrated field performance.
+
+---
+
+## Channel model parameters
+
+Numbers match **`src/main.py`** and **`config.py`**.
+
+- **Path loss exponent:** η = 2.4 (urban micro, non-LOS typical)
+- **Reference loss:** PL(d₀) = 32.44 dB at d₀ = 1 m, carrier **f** = 5.9 GHz
+- **Shadowing:** Fixed 20 dB when the tower–UE LOS segment intersects a building rectangle
+- **Dynamic blocker loss:** Class-dependent base loss and jitter (dB); see table below and scenario-specific `MovingBlocker` entries in `src/main.py`
+- **Fading:** Optional Rayleigh/Rician via `config.enable_small_scale_fading` (Rician **K** = 10 when enabled)—**disabled by default** for reproducibility
+
+**Also in code:** TX power 30 dBm; evaluation outage RSS threshold −95 dBm; map scale 0.1 m per pixel.
+
+---
+
+## Dynamic blocker classes (reference table)
+
+| Class       | Base loss (dB) | Jitter scale (dB) |
+|------------|----------------|-------------------|
+| pedestrian | 7.2–9.0        | 2.0–2.4           |
+| bus        | 12.8–13.5      | 3.2–3.8           |
+| truck      | 15.0–16.0      | 4.4–4.8           |
+
+Values are examples from urban canyon / intersection scenarios. The implemented drop also uses a harmonic term and Gaussian noise scaled by weather entropy (`blocker_shadow_drop` in `src/main.py`).
+
+---
+
+## Key parameters at a glance
+
+| Quantity | Value |
+|----------|--------|
+| Carrier frequency | 5.9 GHz |
+| Path loss exponent η | 2.4 |
+| PL(d₀) at d₀ = 1 m | 32.44 dB |
+| Building LOS blockage | −20 dB |
+| TX power | 30 dBm |
+| Outage threshold (evaluation) | −95 dBm |
+| Small-scale fading | Optional; **off by default** |
+| Rician K (if fading on) | 10 |
+
+---
+
+## Repo alignment
+
+| What you state | Where in code |
+|----------------|---------------|
+| η, PL(d₀), f, TX | `PATH_LOSS_EXPONENT`, `REFERENCE_LOSS_DB`, `FREQ_HZ`, `TX_POWER_DBM` |
+| Building shadow | `SHADOWING_DROP_DB` |
+| Fading default off | `config.enable_small_scale_fading` |
+| Outage threshold | `OUTAGE_RSS_THRESHOLD_DBM` |
+
+Keep this file in sync with **`main.py`** / **`config.py`** if you change constants.
+</file>
+
+<file path="semantic_weight_tuner.py">
+"""
+Genetic-algorithm search for **utility weights** (legacy code: ``SEMANTIC_W_*`` in
+``src/main.py``). Optional for appendix / sensitivity only.
+
+Fitness uses the same Monte Carlo harness with ``policy_weight_override``. That
+optimizes a **composite score on this simulator**—it is not independent validation.
+For publication, prefer fixed weights from ``main.py`` / ``config_reproducibility.py``,
+or disclose a **held-out** scenario/seed protocol (nested evaluation) if you adopt
+tuned values; otherwise reviewers may flag simulator overfitting.
+
+Example:
+  python semantic_weight_tuner.py --generations 5 --population 8 --trials-per-eval 4
+"""
+
+from __future__ import annotations
+
+import argparse
+import random
+import sys
+from typing import Dict, List, Tuple
+
+from config import CONFIG
+
+sys.path.append("src")
+from monte_carlo_runner import MonteCarloEvaluator  # noqa: E402
+
+KEYS = ["w_survival", "w_pred_rss", "w_load", "w_aoi"]
+BOUNDS: Dict[str, Tuple[float, float]] = {
+    "w_survival": (0.15, 2.8),
+    "w_pred_rss": (0.05, 0.55),
+    "w_load": (0.1, 1.35),
+    "w_aoi": (0.15, 1.55),
+}
+
+
+def random_genome(rng: random.Random) -> Dict[str, float]:
+    return {k: rng.uniform(*BOUNDS[k]) for k in KEYS}
+
+
+def crossover(rng: random.Random, a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
+    return {k: a[k] if rng.random() < 0.5 else b[k] for k in KEYS}
+
+
+def mutate(rng: random.Random, g: Dict[str, float], rate: float = 0.28) -> Dict[str, float]:
+    out = dict(g)
+    for k in KEYS:
+        if rng.random() < rate:
+            lo, hi = BOUNDS[k]
+            span = hi - lo
+            out[k] = max(lo, min(hi, out[k] + rng.gauss(0.0, span * 0.11)))
+    return out
+
+
+def evaluate(
+    evaluator: MonteCarloEvaluator,
+    genome: Dict[str, float],
+    n_trials: int,
+    base_seed: int,
+    trajectory_pattern: str,
+) -> float:
+    stats = evaluator.run_monte_carlo(
+        n_trials=n_trials,
+        duration_s=CONFIG.monte_carlo_duration_s,
+        trajectory_pattern=trajectory_pattern,
+        algorithm="my_algorithm",
+        base_seed=base_seed,
+        scenario="urban_canyon",
+        weather_mode="clear",
+        packet_profile="critical",
+        policy_weight_override=genome,
+    )
+    return (
+        float(stats["avg_aoi_external_mean"])
+        + 0.028 * float(stats["handoff_count_mean"])
+        + 0.09 * float(stats["ping_pong_count_mean"])
+    )
+
+
+def run_ga(
+    population: int,
+    generations: int,
+    trials_per_eval: int,
+    seed: int,
+    trajectory_pattern: str,
+) -> Tuple[Dict[str, float], float]:
+    rng = random.Random(seed)
+    evaluator = MonteCarloEvaluator(base_scenario="urban_canyon")
+    pop: List[Dict[str, float]] = [random_genome(rng) for _ in range(population)]
+    best_g: Dict[str, float] = dict(pop[0])
+    best_f = float("inf")
+
+    for gen in range(generations):
+        scored: List[Tuple[float, Dict[str, float]]] = []
+        for i, g in enumerate(pop):
+            f = evaluate(
+                evaluator,
+                g,
+                trials_per_eval,
+                base_seed=9000 + gen * population + i,
+                trajectory_pattern=trajectory_pattern,
+            )
+            scored.append((f, g))
+            if f < best_f:
+                best_f = f
+                best_g = dict(g)
+            print(f"gen {gen:02d} ind {i:02d} fitness={f:.6f}  {g}")
+
+        scored.sort(key=lambda x: x[0])
+        elite_n = max(2, population // 2)
+        survivors = [dict(g) for _, g in scored[:elite_n]]
+        pop = list(survivors)
+        while len(pop) < population:
+            p1, p2 = rng.sample(survivors, 2)
+            pop.append(mutate(rng, crossover(rng, p1, p2)))
+
+    return best_g, best_f
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="GA tuner for semantic handoff weights.")
+    p.add_argument("--population", type=int, default=10)
+    p.add_argument("--generations", type=int, default=6)
+    p.add_argument("--trials-per-eval", type=int, default=4)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--trajectory", type=str, default="random_walk")
+    args = p.parse_args()
+
+    best_g, best_f = run_ga(
+        population=args.population,
+        generations=args.generations,
+        trials_per_eval=args.trials_per_eval,
+        seed=args.seed,
+        trajectory_pattern=args.trajectory,
+    )
+    print("\n=== Best (min fitness) ===")
+    print(f"fitness={best_f:.6f}")
+    print("policy_weight_override / apply to main.py defaults if adopting:")
+    for k in KEYS:
+        print(f"  {k}: {best_g[k]:.4f}")
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="test_handoff.py">
+import sys
+
+sys.path.append("src")
+import main as sim_main
+from monte_carlo_runner import MonteCarloEvaluator
+
+
+def run_controlled_handoff_test() -> None:
+    # Temporary stress settings to validate trigger path.
+    sim_main.HANDOFF_MARGIN_DB = 1.5
+    sim_main.HANDOFF_HOLD_S = 0.15
+
+    evaluator = MonteCarloEvaluator(base_scenario="urban_canyon")
+    result = evaluator.run_single_trial(
+        trial_id=0,
+        duration_s=30.0,
+        trajectory_pattern="linear",
+        algorithm="my_algorithm",
+        seed=123,
+        debug_mode=True,
+    )
+
+    print("=== CONTROLLED HANDOFF TEST ===")
+    print(f"Handoffs: {result['handoff_count']}")
+    print(f"Ping-pong: {result['ping_pong_count']}")
+    print(f"Avg AoI: {result['avg_aoi']:.4f}s")
+    print(f"Peak AoI: {result['peak_aoi']:.4f}s")
+    print(f"Outage: {result['outage_time_s']:.4f}s")
+    print(f"Avg RSS: {result['avg_rss_dbm']:.2f} dBm")
+
+    if result["handoff_count"] == 0:
+        print("Result: 0 handoffs in controlled mode -> investigate trigger conditions further.")
+    else:
+        print("Result: handoff logic is active under controlled conditions.")
+
+
+if __name__ == "__main__":
+    run_controlled_handoff_test()
+</file>
+
+<file path=".gitignore">
+__pycache__/
+*.pyc
+.venv/
+
+# Simulation / evaluation artifacts (regenerate with compare_algorithms.py or src/main.py)
+outputs/**/*.csv
+outputs/**/*.png
+</file>
 
 <file path="baselines.py">
 import math
@@ -205,14 +904,81 @@ class GreedyRSSBaseline:
         return current_tower, False, None
 
 
+class VelocityBiasedRSSBaseline:
+    """
+    Velocity-aided handoff: compare each tower's RSS at a short kinematic lookahead
+    (same ``get_predicted_position`` / ``calculate_measurement`` API as the simulator)
+    against the serving cell's lookahead RSS, with hysteresis + TTT—similar in spirit
+    to mobility-assisted neighbor ranking, without the full proposed composite score.
+    """
+
+    def __init__(
+        self,
+        lookahead_s: float = 0.8,
+        hysteresis_db: float = 3.0,
+        time_to_trigger_s: float = 0.5,
+    ):
+        self.lookahead_s = float(lookahead_s)
+        self.hysteresis_db = float(hysteresis_db)
+        self.time_to_trigger_s = float(time_to_trigger_s)
+        self.candidate_tower: Optional[Tower] = None
+        self.candidate_start_time: Optional[float] = None
+
+    def reset(self) -> None:
+        self.candidate_tower = None
+        self.candidate_start_time = None
+
+    def _pred_rss(self, sim: V2XSmartHandoffSimulator, tower: Tower) -> float:
+        m = sim.calculate_measurement(
+            tower,
+            sim.get_predicted_position(self.lookahead_s),
+            sim.ue_velocity,
+            future_s=self.lookahead_s,
+        )
+        return m.rss_dbm
+
+    def decide(
+        self,
+        sim: V2XSmartHandoffSimulator,
+        measurements: Dict[Tower, Measurement],
+    ) -> Tuple[Tower, bool, Optional[str]]:
+        current = sim.current_tower
+        pred_serving = self._pred_rss(sim, current)
+        best = max(sim.towers, key=lambda t: self._pred_rss(sim, t))
+        pred_best = self._pred_rss(sim, best)
+
+        now_s = getattr(sim, "sim_time_s", None)
+        if now_s is None:
+            now_s = time.time()
+
+        if best != current and pred_best > pred_serving + self.hysteresis_db:
+            if self.candidate_tower != best:
+                self.candidate_tower = best
+                self.candidate_start_time = now_s
+            elif (
+                self.candidate_start_time is not None
+                and (now_s - self.candidate_start_time >= self.time_to_trigger_s)
+            ):
+                old_name = current.name
+                self.reset()
+                return best, True, f"VEL-AID HANDOFF {old_name} -> {best.name}"
+        else:
+            if self.candidate_tower == best:
+                self.reset()
+
+        return current, False, None
+
+
 class MPCLookaheadBaseline:
     """
     Short-horizon model-predictive style baseline: maximize sum of predicted RSS over
     ``horizon_s`` with step ``dt_s``, minus a one-time dB penalty if switching away
     from the serving cell at the first step (reduces ping-pong vs greedy).
+
+    Defaults align with simulator lookahead duration (``PREDICT_LOOKAHEAD_S`` ≈ 0.8 s).
     """
 
-    def __init__(self, horizon_s: float = 1.0, dt_s: float = 0.1, handoff_cost_db: float = 3.0):
+    def __init__(self, horizon_s: float = 0.8, dt_s: float = 0.1, handoff_cost_db: float = 5.0):
         self.horizon_s = float(horizon_s)
         self.dt_s = max(1e-6, float(dt_s))
         self.handoff_cost_db = float(handoff_cost_db)
@@ -425,9 +1191,13 @@ class BaselineRunner:
 """
 Algorithm comparison: full factorial over scenario × weather × packet profile × trajectory,
 or a compact legacy mode (single environment).
+
+For long runs, use ``quick=True`` or ``python compare_algorithms.py --quick`` (see README).
 """
 
+import argparse
 import math
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -451,7 +1221,7 @@ from plotting_utils import (
 SCENARIOS = ["baseline", "urban_canyon", "intersection"]
 WEATHER_MODES = ["clear", "rain", "fog", "storm"]
 PACKET_PROFILES = ["critical", "standard"]
-TRAJECTORY_PATTERNS = ["random_walk", "linear", "circular"]
+TRAJECTORY_PATTERNS = ["random_walk", "linear", "circular", "manhattan_grid", "highway"]
 
 # Trial counts: more trials on **primary** cells (urban_canyon × all trajectory patterns)
 # for power on pre-specified contrasts; fewer elsewhere to cap factorial runtime.
@@ -461,7 +1231,23 @@ SECONDARY_TRIALS = 25
 DEFAULT_FACTORIAL_N_TRIALS = SECONDARY_TRIALS
 
 PRIMARY_TRIAL_SCENARIOS = frozenset({"urban_canyon"})
-PRIMARY_TRIAL_PATTERNS = frozenset({"random_walk", "linear", "circular"})
+PRIMARY_TRIAL_PATTERNS = frozenset({"random_walk", "linear", "circular", "manhattan_grid", "highway"})
+
+# Fast smoke / iteration (~100×+ faster than full factorial): matches primary inference env
+# (urban_canyon, clear, critical) and the three trajectories in ``PRIMARY_ENDPOINTS``.
+QUICK_TRAJECTORIES = ["random_walk", "linear", "circular"]
+QUICK_ENV_CELLS: List[Tuple[str, str, str]] = [("urban_canyon", "clear", "critical")]
+QUICK_DEFAULT_TRIALS = 20
+QUICK_DEFAULT_DURATION_S = 15.0
+
+# Full grid size (for runtime hints): patterns × scenarios × weathers × profiles
+def _full_factorial_num_cells() -> int:
+    return (
+        len(TRAJECTORY_PATTERNS)
+        * len(SCENARIOS)
+        * len(WEATHER_MODES)
+        * len(PACKET_PROFILES)
+    )
 
 
 def _n_trials_for_factorial_cell(
@@ -616,7 +1402,7 @@ def _matches_plot_filter(result: Dict, scenario: str, weather: str, profile: str
 
 
 def write_subgroup_proposed_table(rows: List[Dict], output_path: str) -> Path:
-    """Subgroup analysis: proposed policy AoI vs scenario / weather / profile / trajectory."""
+    """Subgroup detail CSV: proposed policy **external** AoI (primary) + internal AoI (exploratory) per cell."""
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -629,55 +1415,76 @@ def write_subgroup_proposed_table(rows: List[Dict], output_path: str) -> Path:
 
 def build_subgroup_analysis_table(all_results: List[Dict]) -> pd.DataFrame:
     """
-    Paper-style subgroup table: Proposed vs A3 (3GPP) mean AoI, aggregated over
-    trajectory patterns within each (scenario, weather, profile) cell.
+    Paper-style subgroup table: Proposed vs A3 (3GPP), aggregated over trajectory
+    patterns within each (scenario, weather, profile) cell.
 
-    Improvement = (A3 − Proposed) / A3 × 100% (lower AoI is better; shown as ``NN% ↓``).
+    **Primary rows (paper-facing):** mean **external AoI** (``avg_aoi_external_mean``)—
+    independent packet process; see ``compute_external_aoi``.
+
+    **Exploratory columns:** internal simulator AoI (``avg_aoi_mean``), coupled to policy
+    mechanics—report in supplement only.
+
+    Improvement = (A3 − Proposed) / A3 × 100% (lower AoI is better; ``NN% ↓``).
     """
-    # (scenario, weather, profile) -> algorithm_key -> list of avg_aoi_mean (one per trajectory)
-    by_cell: Dict[Tuple, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    by_cell: Dict[Tuple, Dict[str, List[Tuple[float, float]]]] = defaultdict(lambda: defaultdict(list))
 
     for r in all_results:
         key = r.get("algorithm_key")
         if key not in ("my_algorithm", "a3"):
             continue
-        m = r.get("avg_aoi_mean")
-        if m is None or not isinstance(m, (int, float)):
+        ext = r.get("avg_aoi_external_mean")
+        internal = r.get("avg_aoi_mean")
+        if ext is None or not isinstance(ext, (int, float)):
             continue
+        if internal is None or not isinstance(internal, (int, float)):
+            internal = float("nan")
         sc = r.get("experiment_scenario")
         if sc is None:
             continue
         w = r.get("weather_mode")
         p = r.get("packet_profile")
         cell = (sc, w, p)
-        by_cell[cell][key].append(float(m))
+        by_cell[cell][key].append((float(ext), float(internal)))
 
     rows: List[Dict] = []
     for cell in sorted(by_cell.keys(), key=lambda c: (str(c[0]), str(c[1]), str(c[2]))):
-        pv = by_cell[cell].get("my_algorithm", [])
-        av = by_cell[cell].get("a3", [])
-        if not pv or not av:
+        pairs_p = by_cell[cell].get("my_algorithm", [])
+        pairs_a = by_cell[cell].get("a3", [])
+        if not pairs_p or not pairs_a:
             continue
-        proposed_mean = sum(pv) / len(pv)
-        a3_mean = sum(av) / len(av)
-        if a3_mean > 1e-12:
-            imp_pct = (a3_mean - proposed_mean) / a3_mean * 100.0
+        proposed_ext = sum(t[0] for t in pairs_p) / len(pairs_p)
+        a3_ext = sum(t[0] for t in pairs_a) / len(pairs_a)
+        int_p = [t[1] for t in pairs_p if math.isfinite(t[1])]
+        int_a = [t[1] for t in pairs_a if math.isfinite(t[1])]
+        proposed_int = sum(int_p) / len(int_p) if int_p else float("nan")
+        a3_int = sum(int_a) / len(int_a) if int_a else float("nan")
+        if a3_ext > 1e-12:
+            imp_ext = (a3_ext - proposed_ext) / a3_ext * 100.0
         else:
-            imp_pct = float("nan")
+            imp_ext = float("nan")
+        if math.isfinite(a3_int) and a3_int > 1e-12:
+            imp_int = (a3_int - proposed_int) / a3_int * 100.0
+        else:
+            imp_int = float("nan")
         sc, w, p = cell
-        imp_str = f"{imp_pct:.0f}% ↓" if math.isfinite(imp_pct) else ""
+        imp_str = f"{imp_ext:.0f}% ↓" if math.isfinite(imp_ext) else ""
 
         rows.append(
             {
                 "Scenario": SCENARIO_DISPLAY.get(sc, str(sc)),
                 "Weather": WEATHER_DISPLAY.get(w, w if w else ""),
                 "Profile": PROFILE_DISPLAY.get(p, p if p else ""),
-                "Proposed_AoI_s": round(proposed_mean, 6),
-                "A3_AoI_s": round(a3_mean, 6),
-                "Proposed_AoI": f"{proposed_mean:.3f}s",
-                "A3_AoI": f"{a3_mean:.3f}s",
-                "Improvement_pct": round(imp_pct, 2) if math.isfinite(imp_pct) else "",
-                "Improvement": imp_str,
+                "Proposed_External_AoI_s": round(proposed_ext, 6),
+                "A3_External_AoI_s": round(a3_ext, 6),
+                "Proposed_External_AoI": f"{proposed_ext:.3f}s",
+                "A3_External_AoI": f"{a3_ext:.3f}s",
+                "Improvement_External_pct": round(imp_ext, 2) if math.isfinite(imp_ext) else "",
+                "Improvement_External": imp_str,
+                "Proposed_Internal_AoI_s_exploratory": round(proposed_int, 6),
+                "A3_Internal_AoI_s_exploratory": round(a3_int, 6),
+                "Improvement_Internal_pct_exploratory": round(imp_int, 2)
+                if math.isfinite(imp_int)
+                else "",
             }
         )
 
@@ -689,40 +1496,50 @@ def run_comprehensive_comparison(
     n_trials: Optional[int] = None,
     base_seed: int = 42,
     plot_filter: Optional[Tuple[str, str, str]] = DEFAULT_PLOT_FILTER,
+    quick: bool = False,
+    duration_s: Optional[float] = None,
+    slim_baselines: bool = False,
 ) -> List[Dict]:
     """
     Run all algorithms across trajectory patterns and, if ``full_factorial`` is True,
     across scenarios, weather modes, and packet profiles.
 
+    ``quick=True``: only ``QUICK_TRAJECTORIES`` × ``QUICK_ENV_CELLS``, default
+    ``QUICK_DEFAULT_TRIALS`` and ``QUICK_DEFAULT_DURATION_S`` (override with
+    ``n_trials`` / ``duration_s``). For publication use full factorial.
+
+    ``slim_baselines=True``: omit greedy and Q-learning (~2/7 less work per cell).
+
     By default, **urban_canyon** cells use ``PRIMARY_TRIALS`` and all other scenarios
-    use ``SECONDARY_TRIALS`` (better power on the pre-specified primary family). Pass
-    ``n_trials`` to force the same count in every cell (e.g. quick runs).
-
-    Writes ``outputs/subgroup_proposed_aoi.csv`` and ``outputs/subgroup_analysis_table.csv``
-    (Proposed vs A3, improvement %) when results are available.
-
-    Statistical tests group by (pattern, scenario, weather, profile) when factorial
-    metadata is present. A **pre-specified primary family** (``PRIMARY_ENDPOINTS``)
-    gets Holm correction across that family only and is written to
-    ``outputs/primary_family_tests.csv``; the full ``statistical_tests.csv`` grid is
-    exploratory outside that family. Summary plots use ``plot_filter`` (default:
-    urban_canyon / clear / critical) so boxplots are not mixed across 24 environment cells.
+    use ``SECONDARY_TRIALS``. Pass ``n_trials`` to force the same count in every cell.
     """
+    if duration_s is None:
+        duration_s = QUICK_DEFAULT_DURATION_S if quick else 30.0
+
     algorithms = {
         "my_algorithm": "Proposed (Survival-Aware)",
         "a3": "A3 (3GPP Standard)",
         "robust_a3": "Robust A3+ (load-aware RSS + TTT)",
         "mpc": "MPC lookahead (RSS + handoff penalty)",
+        "velocity_aided": "Velocity-aided RSS (lookahead + TTT)",
         "greedy": "Greedy RSS",
         "qlearning": "Q-Learning",
     }
+    if slim_baselines:
+        algorithms.pop("greedy", None)
+        algorithms.pop("qlearning", None)
 
     all_results: List[Dict] = []
     subgroup_rows: List[Dict] = []
 
-    if not full_factorial:
+    quick_trials: Optional[int] = None
+    if quick:
+        patterns = list(QUICK_TRAJECTORIES)
+        envs = list(QUICK_ENV_CELLS)
+        quick_trials = n_trials if n_trials is not None else QUICK_DEFAULT_TRIALS
+    elif not full_factorial:
         patterns = TRAJECTORY_PATTERNS
-        envs: List[Tuple[Optional[str], Optional[str], Optional[str]]] = [
+        envs = [
             ("urban_canyon", None, None),
         ]
     else:
@@ -730,12 +1547,28 @@ def run_comprehensive_comparison(
         envs = [(s, w, p) for s in SCENARIOS for w in WEATHER_MODES for p in PACKET_PROFILES]
 
     total_cells = len(patterns) * len(envs)
+    n_alg = len(algorithms)
+    if quick:
+        print(
+            f"\n>>> QUICK MODE: {total_cells} cells × {n_alg} algorithms "
+            f"× {quick_trials} trials × {duration_s:.0f}s sim "
+            f"(vs full factorial {_full_factorial_num_cells()} cells — much faster).\n"
+        )
+    elif full_factorial:
+        print(
+            f"\n>>> FULL FACTORIAL: {_full_factorial_num_cells()} cells × {n_alg} algorithms "
+            f"(urban_canyon up to {PRIMARY_TRIALS} trials, others {SECONDARY_TRIALS}). "
+            "Long wall-clock expected.\n"
+        )
     cell_idx = 0
 
     for pattern in patterns:
         for scenario, weather, profile in envs:
             cell_idx += 1
-            cell_n_trials = _n_trials_for_factorial_cell(scenario, pattern, n_trials)
+            if quick:
+                cell_n_trials = quick_trials
+            else:
+                cell_n_trials = _n_trials_for_factorial_cell(scenario, pattern, n_trials)
             print(f"\n{'=' * 70}")
             print(
                 f"CELL {cell_idx}/{total_cells} | pattern={pattern} | "
@@ -745,11 +1578,11 @@ def run_comprehensive_comparison(
             print("=" * 70)
 
             pattern_results = []
+            evaluator = MonteCarloEvaluator(base_scenario=scenario or "urban_canyon")
             for algo_name, algo_display in algorithms.items():
-                evaluator = MonteCarloEvaluator(base_scenario=scenario or "urban_canyon")
                 result = evaluator.run_monte_carlo(
                     n_trials=cell_n_trials,
-                    duration_s=30.0,
+                    duration_s=duration_s,
                     trajectory_pattern=pattern,
                     algorithm=algo_name,
                     base_seed=base_seed,
@@ -775,24 +1608,38 @@ def run_comprehensive_comparison(
                         "weather": weather,
                         "profile": profile,
                         "trajectory_pattern": pattern,
-                        "proposed_avg_aoi_mean": proposed["avg_aoi_mean"],
-                        "proposed_avg_aoi_ci_low": proposed["avg_aoi_ci_low"],
-                        "proposed_avg_aoi_ci_high": proposed["avg_aoi_ci_high"],
-                        "proposed_avg_aoi_external_mean": proposed.get("avg_aoi_external_mean", float("nan")),
+                        "proposed_avg_aoi_external_mean": proposed.get(
+                            "avg_aoi_external_mean", float("nan")
+                        ),
+                        "proposed_avg_aoi_external_ci_low": proposed.get(
+                            "avg_aoi_external_ci_low", float("nan")
+                        ),
+                        "proposed_avg_aoi_external_ci_high": proposed.get(
+                            "avg_aoi_external_ci_high", float("nan")
+                        ),
+                        "proposed_avg_aoi_mean_exploratory": proposed["avg_aoi_mean"],
+                        "proposed_avg_aoi_ci_low_exploratory": proposed["avg_aoi_ci_low"],
+                        "proposed_avg_aoi_ci_high_exploratory": proposed["avg_aoi_ci_high"],
                         "proposed_peak_aoi_mean": proposed["peak_aoi_mean"],
                         "n_trials": cell_n_trials,
                     }
                 )
 
             out_dir = Path("outputs") / "comparison_factorial" / pattern
-            if full_factorial:
+            if full_factorial or quick:
                 tag = f"{scenario}_{weather}_{profile}"
             else:
                 tag = "default_env"
             out_dir = out_dir / tag
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            for metric in ["avg_aoi", "peak_aoi", "handoff_count"]:
+            for metric in [
+                "avg_aoi_external",
+                "peak_aoi_external",
+                "avg_aoi",
+                "peak_aoi",
+                "handoff_count",
+            ]:
                 plot_cdf_comparison(
                     pattern_results,
                     metric=metric,
@@ -802,9 +1649,15 @@ def run_comprehensive_comparison(
 
             plot_boxplot_comparison(
                 pattern_results,
+                metric="avg_aoi_external",
+                output_path=str(out_dir / "boxplot_aoi_external.png"),
+                title=f"Average External AoI (primary) — {pattern} / {tag}",
+            )
+            plot_boxplot_comparison(
+                pattern_results,
                 metric="avg_aoi",
-                output_path=str(out_dir / "boxplot_aoi.png"),
-                title=f"Average AoI — {pattern} / {tag}",
+                output_path=str(out_dir / "boxplot_aoi_internal_exploratory.png"),
+                title=f"Average Internal AoI (exploratory) — {pattern} / {tag}",
             )
 
     if subgroup_rows:
@@ -826,7 +1679,7 @@ def run_comprehensive_comparison(
     print("Subgroup vs A3:  outputs/subgroup_analysis_table.csv")
 
     results_for_plots = all_results
-    if plot_filter and full_factorial:
+    if plot_filter and (full_factorial or quick):
         sc, w, p = plot_filter
         results_for_plots = [r for r in all_results if _matches_plot_filter(r, sc, w, p)]
         if not results_for_plots:
@@ -839,6 +1692,7 @@ def run_comprehensive_comparison(
     stats_report = run_statistical_tests(
         all_results,
         output_path="outputs/statistical_tests.csv",
+        primary_output_path="outputs/statistical_tests_primary_endpoints.csv",
     )
     _ = stats_report
 
@@ -853,7 +1707,7 @@ def run_comprehensive_comparison(
     print("\n" + "=" * 80)
     print(
         "PRIMARY FAMILY (pre-specified): Holm across "
-        f"{len(PRIMARY_ENDPOINTS)} tests only → outputs/primary_family_tests.csv"
+        f"{len(PRIMARY_ENDPOINTS)} tests only -> outputs/primary_family_tests.csv"
     )
     print("=" * 80)
     primary_summary = run_primary_tests(all_results)
@@ -868,7 +1722,7 @@ def run_comprehensive_comparison(
         sig = "yes" if row.get("significant_corrected_holm") else "no"
         print(
             f"  {row['trajectory_pattern']}: p={row['p_value']:.4g}, "
-            f"p_holm={row['p_value_corrected_holm']:.4g}, sig(α=0.05)={sig}"
+            f"p_holm={row['p_value_corrected_holm']:.4g}, sig(a=0.05)={sig}"
         )
 
     print("\n" + "=" * 80)
@@ -882,31 +1736,47 @@ def run_comprehensive_comparison(
 
     print("\nALL ANALYSES COMPLETE!")
     print("Check outputs/ for:")
-    print("  - statistical_tests.csv (pairwise tests per pattern × environment cell; exploratory outside primary family)")
+    print("  - statistical_tests.csv (all metrics; exploratory outside primary family except noted)")
+    print("  - statistical_tests_primary_endpoints.csv (external AoI + churn + outage only; paper-facing grid)")
     print("  - primary_family_tests.csv (pre-specified primary endpoint family; Holm across this set only)")
     print("  - targeted_proposed_vs_a3_tests.csv (Proposed vs A3 only; aligns with subgroup table)")
     print("  - subgroup_proposed_aoi.csv (per-trajectory proposed AoI)")
-    print("  - subgroup_analysis_table.csv (Proposed vs A3, mean over trajectories; Improvement %)")
-    print("  - comparison_factorial/… (CDFs and boxplots per cell)")
+    print("  - subgroup_analysis_table.csv (Proposed vs A3; primary = external AoI; internal = exploratory)")
+    print("  - comparison_factorial/... (CDFs and boxplots per cell)")
     print("  - comparison_all_metrics/all_metrics_boxplots.png (filtered summary)")
 
     return all_results
 
 
-def run_ablation_study():
+def run_ablation_study(
+    n_trials: int = 50,
+    duration_s: float = 30.0,
+    patterns: Optional[List[str]] = None,
+    base_seed: int = 42,
+) -> List[Dict]:
     """
-    Run ablation study for the proposed policy (predictive + survival + semantic AoI terms).
+    Run ablation study for the proposed policy (predictive + survival + AoI utility terms).
+
+    Defaults match the original paper-style run (50 trials × 30 s × five trajectories).
+    For faster appendix smoke tests, pass e.g. ``n_trials=15``, ``duration_s=15.0``,
+    ``patterns=["random_walk", "linear", "circular"]``.
     """
     variants = {
-        "my_algorithm": "Proposed (Survival-Aware) — full",
+        "my_algorithm": "Proposed (Survival-Aware) - full",
         "no_survival": "w/o survival score",
         "no_aoi": "w/o AoI term",
         "no_load": "w/o load penalty",
         "reactive_only": "Reactive only (no predictive trigger)",
         "no_relay": "w/o V2V relay fallback",
     }
-    patterns = ["random_walk", "linear", "circular"]
+    if patterns is None:
+        patterns = ["random_walk", "linear", "circular", "manhattan_grid", "highway"]
     all_results = []
+
+    print(
+        f"\n>>> ABLATION: {len(patterns)} pattern(s) × {len(variants)} variants × "
+        f"{n_trials} trials × {duration_s:.0f}s sim\n"
+    )
 
     for pattern in patterns:
         print(f"\n{'=' * 70}")
@@ -914,14 +1784,14 @@ def run_ablation_study():
         print("=" * 70)
 
         pattern_results = []
+        evaluator = MonteCarloEvaluator(base_scenario="urban_canyon")
         for algo_key, display_name in variants.items():
-            evaluator = MonteCarloEvaluator(base_scenario="urban_canyon")
             result = evaluator.run_monte_carlo(
-                n_trials=50,
-                duration_s=30.0,
+                n_trials=n_trials,
+                duration_s=duration_s,
                 trajectory_pattern=pattern,
                 algorithm=algo_key,
-                base_seed=42,
+                base_seed=base_seed,
                 scenario="urban_canyon",
                 weather_mode="clear",
                 packet_profile="critical",
@@ -935,7 +1805,14 @@ def run_ablation_study():
         output_dir = Path("outputs") / f"ablation_{pattern}"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        for metric in ["avg_aoi", "peak_aoi", "handoff_count", "outage_time_s"]:
+        for metric in [
+            "avg_aoi_external",
+            "peak_aoi_external",
+            "avg_aoi",
+            "peak_aoi",
+            "handoff_count",
+            "outage_time_s",
+        ]:
             plot_cdf_comparison(
                 pattern_results,
                 metric=metric,
@@ -945,19 +1822,105 @@ def run_ablation_study():
 
         plot_boxplot_comparison(
             pattern_results,
+            metric="avg_aoi_external",
+            output_path=str(output_dir / "boxplot_aoi_external.png"),
+            title=f"Ablation Average External AoI (primary) - {pattern.replace('_', ' ').title()}",
+        )
+        plot_boxplot_comparison(
+            pattern_results,
             metric="avg_aoi",
-            output_path=str(output_dir / "boxplot_aoi.png"),
-            title=f"Ablation Average AoI - {pattern.replace('_', ' ').title()}",
+            output_path=str(output_dir / "boxplot_aoi_internal_exploratory.png"),
+            title=f"Ablation Average Internal AoI (exploratory) - {pattern.replace('_', ' ').title()}",
         )
         all_results.extend(pattern_results)
 
-    run_statistical_tests(all_results, output_path="outputs/statistical_tests_ablation.csv")
+    run_statistical_tests(
+        all_results,
+        output_path="outputs/statistical_tests_ablation.csv",
+        primary_output_path="outputs/statistical_tests_ablation_primary_endpoints.csv",
+    )
     plot_all_metrics_boxplots(all_results, output_dir="outputs/ablation_all_metrics")
     return all_results
 
 
 if __name__ == "__main__":
-    results = run_comprehensive_comparison()
+    parser = argparse.ArgumentParser(
+        description="Factorial algorithm comparison (use --quick for fast iteration).",
+    )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help=(
+            "Small grid: urban_canyon + clear + critical, trajectories random_walk/linear/circular, "
+            f"{QUICK_DEFAULT_TRIALS} trials, {QUICK_DEFAULT_DURATION_S:.0f}s sim (override with --n-trials / --duration-s)."
+        ),
+    )
+    parser.add_argument(
+        "--no-full-factorial",
+        action="store_true",
+        help="Legacy compact mode (all patterns, single env) — not the same as --quick.",
+    )
+    parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Uniform trial count for every cell (overrides primary/secondary split unless --quick supplies default).",
+    )
+    parser.add_argument(
+        "--duration-s",
+        type=float,
+        default=None,
+        help="Simulated seconds per trial (default 30 full, 15 quick).",
+    )
+    parser.add_argument(
+        "--slim-baselines",
+        action="store_true",
+        help="Drop greedy + Q-learning to save ~2/7 runtime per cell.",
+    )
+    parser.add_argument(
+        "--ablation",
+        action="store_true",
+        help="Run appendix ablation study only (urban_canyon / clear / critical); then exit.",
+    )
+    parser.add_argument(
+        "--ablation-trials",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Trials per variant per pattern (default 50).",
+    )
+    parser.add_argument(
+        "--ablation-duration",
+        type=float,
+        default=30.0,
+        help="Simulated seconds per trial for ablation (default 30).",
+    )
+    parser.add_argument(
+        "--ablation-patterns",
+        type=str,
+        default="",
+        help="Comma-separated patterns (default: all five trajectories). Example: random_walk,linear,circular",
+    )
+    args = parser.parse_args()
+    if args.ablation:
+        ab_patterns: Optional[List[str]] = None
+        if args.ablation_patterns.strip():
+            ab_patterns = [p.strip() for p in args.ablation_patterns.split(",") if p.strip()]
+        run_ablation_study(
+            n_trials=args.ablation_trials,
+            duration_s=args.ablation_duration,
+            patterns=ab_patterns,
+        )
+        sys.exit(0)
+
+    results = run_comprehensive_comparison(
+        full_factorial=not args.no_full_factorial,
+        quick=args.quick,
+        n_trials=args.n_trials,
+        duration_s=args.duration_s,
+        slim_baselines=args.slim_baselines,
+    )
 </file>
 
 <file path="compare_baselines.py">
@@ -980,6 +1943,7 @@ def compare_algorithms(
         ("A3 (3GPP)", "a3_3gpp"),
         ("Robust A3+", "a3_robust"),
         ("MPC lookahead", "mpc_lookahead"),
+        ("Velocity-aided RSS", "velocity_aided_rss"),
         ("Greedy RSS", "greedy_rss"),
         ("Q-Learning", "q_learning"),
     ]
@@ -1014,9 +1978,15 @@ def compare_algorithms(
 
     plot_cdf_comparison(
         results_list,
+        metric="avg_aoi_external",
+        output_path=str(output_dir / f"baseline_cdf_avg_aoi_external_{stamp}.png"),
+        title="External AoI (primary) CDF — Baselines",
+    )
+    plot_cdf_comparison(
+        results_list,
         metric="avg_aoi",
-        output_path=str(output_dir / f"baseline_cdf_avg_aoi_{stamp}.png"),
-        title="AoI CDF Comparison Across Baselines",
+        output_path=str(output_dir / f"baseline_cdf_avg_aoi_internal_{stamp}.png"),
+        title="Internal AoI (exploratory) CDF — Baselines",
     )
     plot_boxplot_comparison(
         results_list,
@@ -1030,13 +2000,13 @@ def compare_algorithms(
         n_samples=1200,
     )
 
-    print("\nAlgorithm         Avg AoI (s)   95% CI                Handoffs   Outage (s)")
+    print("\nAlgorithm         Ext.AoI (s)  95% CI                Handoffs   Outage (s)")
     print("-" * 76)
     for name, stats in summary.items():
-        ci = (stats["avg_aoi_ci_low"], stats["avg_aoi_ci_high"])
+        ci = (stats["avg_aoi_external_ci_low"], stats["avg_aoi_external_ci_high"])
         print(
             f"{name:<16} "
-            f"{stats['avg_aoi_mean']:<12.4f} "
+            f"{stats['avg_aoi_external_mean']:<12.4f} "
             f"[{ci[0]:.4f}, {ci[1]:.4f}]   "
             f"{stats['handoff_count_mean']:<8.2f} "
             f"{stats['outage_time_s_mean']:.3f}"
@@ -1110,12 +2080,14 @@ REPRODUCIBILITY_CONFIG: Dict[str, Any] = {
         "headless_monte_carlo": True,
         "enable_small_scale_fading": False,
         "rician_k_factor": 10.0,
+        "monte_carlo_enable_small_scale_fading": True,
         # Default trial count for standalone ``monte_carlo_runner.py`` / ``config.CONFIG`` runs.
         # Factorial batch evaluation in ``compare_algorithms.py`` uses ``PRIMARY_TRIALS`` (100)
         # and ``SECONDARY_TRIALS`` (25) per cell instead—see that module for power allocation.
         "monte_carlo_trials": 100,
         "monte_carlo_duration_s": 30.0,
         "monte_carlo_base_seed": 42,
+        "bootstrap_n_resamples": 1999,
     },
     # Matches monte_carlo_runner.MonteCarloEvaluator._ablation_profile + full policy.
     "semantic_weights": {
@@ -1159,9 +2131,13 @@ REPRODUCIBILITY_CONFIG: Dict[str, Any] = {
         },
     },
     "notes": [
-        "Ablation runs mutate module-level globals in src/main.py inside try/finally; see MonteCarloEvaluator._apply_ablation_knobs.",
+        "Ablation runs apply merged knob dicts per trial on each V2XSmartHandoffSimulator instance (see MonteCarloEvaluator._merged_policy_profile).",
         "compare_algorithms factorial: PRIMARY_TRIALS / SECONDARY_TRIALS in compare_algorithms.py "
         "(urban_canyon × trajectories use primary; optional uniform n_trials= overrides all).",
+        "Tower load = scheduled component + cross-traffic from per-tower invisible UE sessions (birth–death); see BACKGROUND_* in src/main.py.",
+        "Monte Carlo uses CONFIG.monte_carlo_enable_small_scale_fading (Rician LOS / Rayleigh NLOS) via sim.enable_small_scale_fading_override; GUI uses CONFIG.enable_small_scale_fading unless override is set.",
+        "Baselines include velocity-aided RSS (lookahead + TTT), MPC (horizon 0.8 s, handoff cost 5 dB), and tabular Q-learning with richer state + decaying epsilon.",
+        "Statistical exports: statistical_tests.csv (all metrics); statistical_tests_primary_endpoints.csv (external AoI + churn + outage); Cliff's delta for discrete counts.",
     ],
 }
 
@@ -1183,151 +2159,23 @@ class SimConfig:
     # Performance
     headless_monte_carlo: bool = True
 
-    # Channel modeling
+    # Channel modeling (interactive GUI defaults)
     enable_small_scale_fading: bool = False
     rician_k_factor: float = 10.0
+    # Monte Carlo / batch eval: Rician (LOS) when unblocked, Rayleigh when blocked — robustness vs fast fading.
+    monte_carlo_enable_small_scale_fading: bool = True
 
     # Monte Carlo defaults
     monte_carlo_trials: int = 100
     monte_carlo_duration_s: float = 30.0
     monte_carlo_base_seed: int = 42
 
+    # Statistical reporting: bootstrap resamples for pairwise effect CIs in ``plotting_utils``.
+    # Use 9999 for publication-grade stability; 1999 is a practical default for large factorial grids.
+    bootstrap_n_resamples: int = 1999
+
 
 CONFIG = SimConfig()
-</file>
-
-<file path="docs/PRIMARY_AND_SECONDARY_ENDPOINTS.md">
-# Pre-specified primary and secondary endpoints (paper text)
-
-Use this block (adapt section numbers) in your **Methods / Evaluation** or **Experimental Design** section so reviewers see a **single primary outcome** and no “fishing” across metrics.
-
----
-
-## Markdown version
-
-**Primary and secondary outcomes**
-
-We **pre-specify *external Age of Information (AoI)*** as our **primary endpoint**. External AoI is the time-averaged instantaneous age, under an **independent packet process** that does not use the handoff policy’s semantic weights or internal AoI integrator: packets arrive at a fixed rate; each scheduled reception succeeds if and only if the **serving RSS** exceeds a fixed outage threshold (same physical layer geometry as the simulator). Lower external AoI is better. Implementation: `compute_external_aoi()` in `monte_carlo_runner.py` (trial-level mean over the Monte Carlo window; default packet rate 10 Hz unless stated).
-
-**Note on primary family:** External AoI is the primary **metric** (the outcome we emphasize in conclusions). That is not the same thing as the pre-specified primary **inference family** in code: `compare_algorithms.PRIMARY_ENDPOINTS` fixes a *small set of hypothesis tests* on that metric (e.g. external AoI, Proposed vs Robust A3+, three trajectories, one environment cell). **Holm–Bonferroni** in `outputs/primary_family_tests.csv` applies **only across that family**. Other contrasts—including the full pairwise grid in `statistical_tests.csv` and the separate **Proposed vs A3** targeted table—are **secondary or exploratory** unless you explicitly add them to `PRIMARY_ENDPOINTS`.
-
-**Secondary endpoints** (reported for context, not used to change the primary conclusion without disclosure):
-
-- **Handoff count** and **ping-pong count** (network churn / stability).
-- **Outage time** (fraction of time below RSS threshold on the serving link).
-- **Internal (simulator) AoI** — the integrated AoI state used inside the environment; we report it as **exploratory** because it shares mechanisms with some policies and is not our primary inferential target.
-
-**Exploratory analyses** may include peak AoI, average RSS, or subgroup tables (e.g. Proposed vs A3 by scenario); these are **hypothesis-generating** unless pre-specified in a protocol addendum.
-
----
-
-## Short version (plain paragraph)
-
-We pre-specify **external AoI** as our **primary outcome metric**: the time average of instantaneous age under an independent packet process (fixed packet rate; reception succeeds if and only if serving RSS exceeds a fixed outage threshold). That process does not use the handoff policy’s semantic weights or the simulator’s internal AoI integrator. **Secondary metrics** include handoff count, ping-pong count, and outage time. We report **internal AoI** only as exploratory, since it is coupled to the same environment dynamics as some policies. Primary conclusions should be framed on **external AoI** unless an analysis is explicitly labelled exploratory.
-
----
-
-## Alignment with code
-
-| Endpoint            | Code / output |
-|---------------------|----------------|
-| Primary: external AoI (mean) | `compute_external_aoi()`, trial field `avg_aoi_external`, Monte Carlo `avg_aoi_external_mean` |
-| Primary (peak, optional)     | `peak_aoi_external` |
-| Secondary: handoffs / ping-pong | `handoff_count`, `ping_pong_count` per trial |
-| Secondary: outage            | `outage_time_s` |
-| Exploratory: internal AoI    | `avg_aoi`, `peak_aoi` |
-
-**Targeted inference (Proposed vs A3):** `plotting_utils.test_proposed_vs_a3` and `run_targeted_proposed_vs_a3_all_cells` produce `outputs/targeted_proposed_vs_a3_tests.csv`—trial-level tests **pooled across trajectory patterns** per (scenario, weather, profile), aligned with the subgroup improvement table (not the all-pairwise `statistical_tests.csv`).
-
-**Primary family (FWER across a pre-specified set):** `compare_algorithms.run_primary_tests` and `PRIMARY_ENDPOINTS` define a small family (e.g. external AoI, Proposed vs Robust A3+, three trajectories, fixed weather/profile matching the default plot filter); Holm correction applies **only across that family**, with results in `outputs/primary_family_tests.csv`. The full `statistical_tests.csv` grid is **exploratory** outside this family unless you expand `PRIMARY_ENDPOINTS`.
-
----
-
-## Why this satisfies reviewers
-
-- **One primary endpoint** reduces the appearance of p-hacking across many metrics.
-- **External AoI** is defined without the policy’s semantic objective, improving separation from the proposed algorithm’s internal loss.
-- No new experiments are required—only **clear writing** and **consistent emphasis** in abstract, conclusion, and figures (e.g. lead with external AoI in the main comparison figure).
-</file>
-
-<file path="docs/SIMULATION_FIDELITY_AND_LIMITATIONS.md">
-# Simulation fidelity, scope, and limitations
-
-## Purpose of this document
-
-This document describes **what the V2X Smart Handoff Simulator (research edition) models**, lists **channel and evaluation parameters** that match the code, and states **limitations** so paper claims stay aligned with implementation. Use the boilerplate below in *Limitations*, *Simulation setup*, or *Discussion*; it is not internal author notes.
-
-The study is a **controlled geometric simulation** (explicit, reproducible rules)—**not** a claim about field V2X performance. Wording fits titles and abstracts that say **“simulated.”**
-
----
-
-## Wording for papers or reports (plain text)
-
-You can paste this into a “Limitations,” “Simulation setup,” or “Discussion” subsection:
-
-Our evaluation uses a geometric 2D channel model with log-distance path loss, binary building shadowing, and heuristic moving-blocker attenuation. While this captures key V2X phenomena (blockage, Doppler, handoff triggers), it does not implement full 3GPP TR 38.901 channel modeling or map-based mobility. Consequently, our results demonstrate *algorithmic relative performance* under controlled conditions, not absolute field performance. Future work will validate against ns-3/Simu5G packet-level simulation and real-world V2X traces.
-
-**Optional extra sentence:** The implementation is discrete-time, with hysteresis and time-to-trigger–style handoffs; the proposed policy adds short-horizon predicted RSS and survival-style scoring (see `src/main.py`).
-
----
-
-## One-sentence positioning (abstract / intro)
-
-We evaluate the proposed handoff policy in a **simulated** vehicular-style network with geometric blockage and a log-distance channel; results characterize **relative** algorithmic behavior under controlled scenarios, not calibrated field performance.
-
----
-
-## Channel model parameters
-
-Numbers match **`src/main.py`** and **`config.py`**.
-
-- **Path loss exponent:** η = 2.4 (urban micro, non-LOS typical)
-- **Reference loss:** PL(d₀) = 32.44 dB at d₀ = 1 m, carrier **f** = 5.9 GHz
-- **Shadowing:** Fixed 20 dB when the tower–UE LOS segment intersects a building rectangle
-- **Dynamic blocker loss:** Class-dependent base loss and jitter (dB); see table below and scenario-specific `MovingBlocker` entries in `src/main.py`
-- **Fading:** Optional Rayleigh/Rician via `config.enable_small_scale_fading` (Rician **K** = 10 when enabled)—**disabled by default** for reproducibility
-
-**Also in code:** TX power 30 dBm; evaluation outage RSS threshold −95 dBm; map scale 0.1 m per pixel.
-
----
-
-## Dynamic blocker classes (reference table)
-
-| Class       | Base loss (dB) | Jitter scale (dB) |
-|------------|----------------|-------------------|
-| pedestrian | 7.2–9.0        | 2.0–2.4           |
-| bus        | 12.8–13.5      | 3.2–3.8           |
-| truck      | 15.0–16.0      | 4.4–4.8           |
-
-Values are examples from urban canyon / intersection scenarios. The implemented drop also uses a harmonic term and Gaussian noise scaled by weather entropy (`blocker_shadow_drop` in `src/main.py`).
-
----
-
-## Key parameters at a glance
-
-| Quantity | Value |
-|----------|--------|
-| Carrier frequency | 5.9 GHz |
-| Path loss exponent η | 2.4 |
-| PL(d₀) at d₀ = 1 m | 32.44 dB |
-| Building LOS blockage | −20 dB |
-| TX power | 30 dBm |
-| Outage threshold (evaluation) | −95 dBm |
-| Small-scale fading | Optional; **off by default** |
-| Rician K (if fading on) | 10 |
-
----
-
-## Repo alignment
-
-| What you state | Where in code |
-|----------------|---------------|
-| η, PL(d₀), f, TX | `PATH_LOSS_EXPONENT`, `REFERENCE_LOSS_DB`, `FREQ_HZ`, `TX_POWER_DBM` |
-| Building shadow | `SHADOWING_DROP_DB` |
-| Fading default off | `config.enable_small_scale_fading` |
-| Outage threshold | `OUTAGE_RSS_THRESHOLD_DBM` |
-
-Keep this file in sync with **`main.py`** / **`config.py`** if you change constants.
 </file>
 
 <file path="monte_carlo_runner.py">
@@ -1360,6 +2208,7 @@ MONTE_CARLO_ALGORITHM_CSV_LABELS: Dict[str, str] = {
     "greedy_rss": "Greedy RSS",
     "q_learning": "Q-Learning",
     "mpc_lookahead": "MPC lookahead (RSS + handoff penalty)",
+    "velocity_aided_rss": "Velocity-aided RSS (lookahead + TTT)",
 }
 
 
@@ -1401,8 +2250,17 @@ def apply_sim_environment(
 
 
 import main as sim_main
-from baselines import MPCLookaheadBaseline, RobustA3Baseline
-from main import FPS, HEIGHT, Measurement, OUTAGE_RSS_THRESHOLD_DBM, Tower, WIDTH, V2XSmartHandoffSimulator
+from baselines import MPCLookaheadBaseline, RobustA3Baseline, VelocityBiasedRSSBaseline
+from main import (
+    FPS,
+    HEIGHT,
+    METER_PER_PIXEL,
+    Measurement,
+    OUTAGE_RSS_THRESHOLD_DBM,
+    Tower,
+    WIDTH,
+    V2XSmartHandoffSimulator,
+)
 
 
 def _telemetry_rows_for_external_aoi(trial_results: Dict) -> List[Dict[str, float]]:
@@ -1474,44 +2332,64 @@ def compute_external_aoi_peak(trial_results: Dict, packet_rate_hz: float = 10.0)
 
 
 class QLearningHandoff:
-    """Simple tabular Q-learning baseline policy."""
+    """
+    Tabular Q-learning with a richer discretized state (serving RSS, speed, distance to
+    strongest neighbor, RSS margin strongest−serving) and time-decaying ε-greedy exploration.
+    Reward stresses low internal AoI with handoff and outage penalties (aligned with
+    other baselines that share the same environment integrator).
+    """
 
     def __init__(
         self,
         towers: List[Tower],
-        alpha: float = 0.1,
-        gamma: float = 0.95,
-        epsilon: float = 0.1,
+        alpha: float = 0.12,
+        gamma: float = 0.96,
+        epsilon_start: float = 0.12,
+        epsilon_end: float = 0.02,
     ) -> None:
         self.towers = towers
         self.alpha = alpha
         self.gamma = gamma
-        self.epsilon = epsilon
-        self.q_table: Dict[Tuple[int, int, int], Dict[str, float]] = {}
+        self.epsilon_start = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.q_table: Dict[Tuple[int, int, int, int], Dict[str, float]] = {}
 
-    def _ensure_state(self, state: Tuple[int, int, int]) -> None:
+    def _ensure_state(self, state: Tuple[int, int, int, int]) -> None:
         if state not in self.q_table:
             self.q_table[state] = {t.name: 0.0 for t in self.towers}
 
-    def discretize(self, rss_dbm: float, speed_mps: float, distance_m: float) -> Tuple[int, int, int]:
-        rss_bin = int((rss_dbm + 140.0) // 10.0)
-        speed_bin = int(speed_mps // 5.0)
-        dist_bin = int(distance_m // 50.0)
-        return (rss_bin, speed_bin, dist_bin)
+    def discretize(
+        self,
+        rss_dbm: float,
+        speed_mps: float,
+        distance_m: float,
+        margin_db: float,
+    ) -> Tuple[int, int, int, int]:
+        rss_bin = int(max(-30, min(30, (rss_dbm + 130.0) // 5.0)))
+        speed_bin = int(min(25, speed_mps // 4.0))
+        dist_bin = int(min(40, distance_m // 40.0))
+        margin_bin = int(max(-8, min(20, margin_db // 4.0)))
+        return (rss_bin, speed_bin, dist_bin, margin_bin)
 
-    def choose_action(self, state: Tuple[int, int, int]) -> Tower:
+    def epsilon_for_step(self, frame_idx: int, total_frames: int) -> float:
+        if total_frames <= 1:
+            return self.epsilon_end
+        t = min(1.0, max(0.0, frame_idx / float(total_frames)))
+        return self.epsilon_start + (self.epsilon_end - self.epsilon_start) * t
+
+    def choose_action(self, state: Tuple[int, int, int, int], epsilon: float) -> Tower:
         self._ensure_state(state)
-        if random.random() < self.epsilon:
+        if random.random() < epsilon:
             return random.choice(self.towers)
         best_name = max(self.q_table[state], key=self.q_table[state].get)
         return next(t for t in self.towers if t.name == best_name)
 
     def update(
         self,
-        state: Tuple[int, int, int],
+        state: Tuple[int, int, int, int],
         action: Tower,
         reward: float,
-        next_state: Tuple[int, int, int],
+        next_state: Tuple[int, int, int, int],
     ) -> None:
         self._ensure_state(state)
         self._ensure_state(next_state)
@@ -1557,16 +2435,22 @@ class MonteCarloEvaluator:
             relay.vx = random.uniform(-15, 15)
             relay.vy = random.uniform(-15, 15)
 
-        # Randomize initial tower loads
+        # Scheduled load + invisible cross-traffic sessions (other UEs on each tower).
         for tower in sim.towers:
-            sim.tower_loads[tower.name] = random.uniform(0.15, 0.75)
+            sim.scheduled_tower_loads[tower.name] = random.uniform(0.12, 0.52)
+            sim.background_session_count[tower.name] = random.randint(1, 10)
+        sim._sync_cross_load_from_session_counts()
+        for tower in sim.towers:
+            s = sim.scheduled_tower_loads[tower.name]
+            c = sim.cross_traffic_load[tower.name]
+            sim.tower_loads[tower.name] = max(0.05, min(0.99, s + c))
 
     def generate_synthetic_trajectory(
         self, duration_s: float = 30.0, pattern: str = "random_walk"
     ) -> List[Tuple[int, int]]:
         """
         Generate synthetic UE trajectory without mouse input.
-        Patterns: 'random_walk', 'linear', 'circular', 'figure8'
+        Patterns: 'random_walk', 'linear', 'circular', 'figure8', 'manhattan_grid', 'highway'
         """
         import math
 
@@ -1624,6 +2508,50 @@ class MonteCarloEvaluator:
                 y = int(center_y + height * math.sin(2 * t) / 2)
                 positions.append((x, y))
 
+        elif pattern == "manhattan_grid":
+            margin_l, margin_r = 80, WIDTH - 520
+            margin_t, margin_b = 75, HEIGHT - 75
+            x, y = float(random.randint(margin_l + 40, margin_l + 120)), float(
+                random.uniform(margin_t + 40, margin_b - 80)
+            )
+            leg_len = max(18, (margin_r - margin_l) // 14)
+            direction = 0  # 0=E,1=N,2=W,3=S
+            step = 3.8
+            for i in range(n_frames):
+                if i > 0 and i % leg_len == 0:
+                    direction = (direction + random.choice([1, 3])) % 4
+                    if random.random() < 0.22:
+                        direction = random.randint(0, 3)
+                if direction == 0:
+                    x += step
+                elif direction == 1:
+                    y -= step
+                elif direction == 2:
+                    x -= step
+                else:
+                    y += step
+                if x > margin_r or x < margin_l:
+                    x = max(margin_l, min(margin_r, x))
+                    direction = 2 if direction == 0 else 0 if direction == 2 else direction
+                if y > margin_b or y < margin_t:
+                    y = max(margin_t, min(margin_b, y))
+                    direction = 3 if direction == 1 else 1 if direction == 3 else direction
+                x += random.gauss(0, 0.85)
+                y += random.gauss(0, 0.85)
+                positions.append((int(max(margin_l, min(margin_r, x))), int(max(margin_t, min(margin_b, y)))))
+
+        elif pattern == "highway":
+            vx_mps = random.uniform(20.0, 34.0)
+            x = float(random.randint(90, 180))
+            y = float(HEIGHT // 2 + random.uniform(-42, 42))
+            dt = 1.0 / FPS
+            for _ in range(n_frames):
+                x += (vx_mps / METER_PER_PIXEL) * dt
+                y += random.gauss(0, 1.0)
+                y = max(HEIGHT * 0.22, min(HEIGHT * 0.76, y))
+                x = max(70.0, min(float(WIDTH - 520), x))
+                positions.append((int(x), int(y)))
+
         else:
             raise ValueError(f"Unsupported trajectory pattern: {pattern}")
 
@@ -1647,6 +2575,8 @@ class MonteCarloEvaluator:
             "a3_robust": "a3_robust",
             "mpc": "mpc_lookahead",
             "mpc_lookahead": "mpc_lookahead",
+            "velocity_aided": "velocity_aided_rss",
+            "velocity_aided_rss": "velocity_aided_rss",
         }
         key = algorithm.lower()
         return aliases.get(key, key)
@@ -1661,31 +2591,34 @@ class MonteCarloEvaluator:
         }
         return profiles.get(algorithm_key)
 
-    def _snapshot_ablation_knobs(self) -> Dict[str, float | bool]:
+    def _default_policy_profile_from_module(self) -> Dict[str, float | bool]:
+        """Baseline knob values (repro bundle edits ``src/main.py`` module constants)."""
         return {
-            "w_survival": sim_main.SEMANTIC_W_SURVIVAL,
-            "w_pred_rss": sim_main.SEMANTIC_W_PREDICTED_RSS,
-            "w_load": sim_main.SEMANTIC_W_LOAD,
-            "w_aoi": sim_main.SEMANTIC_W_AOI,
-            "enable_predictive_trigger": sim_main.ENABLE_PREDICTIVE_TRIGGER,
-            "enable_relay_fallback": sim_main.ENABLE_RELAY_FALLBACK,
+            "w_survival": float(sim_main.SEMANTIC_W_SURVIVAL),
+            "w_pred_rss": float(sim_main.SEMANTIC_W_PREDICTED_RSS),
+            "w_load": float(sim_main.SEMANTIC_W_LOAD),
+            "w_aoi": float(sim_main.SEMANTIC_W_AOI),
+            "enable_predictive_trigger": bool(sim_main.ENABLE_PREDICTIVE_TRIGGER),
+            "enable_relay_fallback": bool(sim_main.ENABLE_RELAY_FALLBACK),
         }
 
-    def _apply_ablation_knobs(self, profile: Dict[str, float | bool] | None) -> None:
-        sim_main.SEMANTIC_W_SURVIVAL = float(profile.get("w_survival", 1.0)) if profile else 1.0
-        sim_main.SEMANTIC_W_PREDICTED_RSS = float(profile.get("w_pred_rss", 0.22)) if profile else 0.22
-        sim_main.SEMANTIC_W_LOAD = float(profile.get("w_load", 0.60)) if profile else 0.60
-        sim_main.SEMANTIC_W_AOI = float(profile.get("w_aoi", 0.80)) if profile else 0.80
-        sim_main.ENABLE_PREDICTIVE_TRIGGER = bool(profile.get("enable_predictive_trigger", True)) if profile else True
-        sim_main.ENABLE_RELAY_FALLBACK = bool(profile.get("enable_relay_fallback", True)) if profile else True
-
-    def _restore_ablation_knobs(self, snapshot: Dict[str, float | bool]) -> None:
-        sim_main.SEMANTIC_W_SURVIVAL = float(snapshot["w_survival"])
-        sim_main.SEMANTIC_W_PREDICTED_RSS = float(snapshot["w_pred_rss"])
-        sim_main.SEMANTIC_W_LOAD = float(snapshot["w_load"])
-        sim_main.SEMANTIC_W_AOI = float(snapshot["w_aoi"])
-        sim_main.ENABLE_PREDICTIVE_TRIGGER = bool(snapshot["enable_predictive_trigger"])
-        sim_main.ENABLE_RELAY_FALLBACK = bool(snapshot["enable_relay_fallback"])
+    def _merged_policy_profile(self, algorithm_key: str) -> Dict[str, float | bool]:
+        profile = dict(self._default_policy_profile_from_module())
+        ov = self._ablation_profile(algorithm_key)
+        if ov:
+            if "w_survival" in ov:
+                profile["w_survival"] = float(ov["w_survival"])
+            if "w_aoi" in ov:
+                profile["w_aoi"] = float(ov["w_aoi"])
+            if "w_load" in ov:
+                profile["w_load"] = float(ov["w_load"])
+            if "w_pred_rss" in ov:
+                profile["w_pred_rss"] = float(ov["w_pred_rss"])
+            if "enable_predictive_trigger" in ov:
+                profile["enable_predictive_trigger"] = bool(ov["enable_predictive_trigger"])
+            if "enable_relay_fallback" in ov:
+                profile["enable_relay_fallback"] = bool(ov["enable_relay_fallback"])
+        return profile
 
     def run_single_trial(
         self,
@@ -1698,6 +2631,8 @@ class MonteCarloEvaluator:
         scenario: Optional[str] = None,
         weather_mode: Optional[str] = None,
         packet_profile: Optional[str] = None,
+        sim: Optional[V2XSmartHandoffSimulator] = None,
+        policy_weight_override: Optional[Dict[str, float]] = None,
     ) -> Dict:
         """
         Run one complete simulation trial.
@@ -1708,40 +2643,69 @@ class MonteCarloEvaluator:
         """
         algorithm_key = self._normalize_algorithm(algorithm)
         self._validate_algorithm(algorithm_key)
-        knobs_snapshot = self._snapshot_ablation_knobs()
-        self._apply_ablation_knobs(self._ablation_profile(algorithm_key))
-        sim = V2XSmartHandoffSimulator(headless=CONFIG.headless_monte_carlo)
+        owns_sim = sim is None
+        if owns_sim:
+            sim = V2XSmartHandoffSimulator(headless=CONFIG.headless_monte_carlo)
+
+        sim.enable_small_scale_fading_override = CONFIG.monte_carlo_enable_small_scale_fading
+
         scenario_name = scenario if scenario is not None else self.base_scenario
         sim.apply_scenario(scenario_name)
         apply_sim_environment(sim, weather_mode=weather_mode, packet_profile=packet_profile)
+
+        merged = self._merged_policy_profile(algorithm_key)
+        if policy_weight_override:
+            for key, val in policy_weight_override.items():
+                if key in merged:
+                    merged[key] = float(val)
+        sim.apply_policy_profile(merged)
+
         sim.debug_handoff = debug_mode
-        if debug_mode:
-            sim_main.HANDOFF_MARGIN_DB = 2.0
-            sim_main.HANDOFF_HOLD_S = 0.20
+        pre_debug_m, pre_debug_h = sim.handoff_margin_db, sim.handoff_hold_s
 
-        self.randomize_scenario_parameters(sim, seed=seed)
-        policy_state = self._init_policy_state(sim, algorithm_key)
-
-        if trajectory_pattern != "mouse":
-            positions = self.generate_synthetic_trajectory(duration_s, trajectory_pattern)
-            sim.replay_positions = positions
-            sim.replay_mode = True
-            sim.replay_index = 0
-
-        dt = 1.0 / FPS
-        n_frames = int(duration_s * FPS)
-
-        aoi_values = []
+        aoi_values: List[float] = []
         connected_rss_trace: List[float] = []
         rss_values = {tower.name: [] for tower in sim.towers}
-        handoff_events = []
-        connected_towers = []
+        handoff_events: List[Dict] = []
+        connected_towers: List[str] = []
         outage_frames = 0
 
         try:
+            if debug_mode:
+                sim.handoff_margin_db = 2.0
+                sim.handoff_hold_s = 0.20
+
+            self.randomize_scenario_parameters(sim, seed=seed)
+            policy_state = self._init_policy_state(sim, algorithm_key)
+
+            if trajectory_pattern != "mouse":
+                positions = self.generate_synthetic_trajectory(duration_s, trajectory_pattern)
+                sim.replay_positions = positions
+                sim.replay_mode = True
+                sim.replay_index = 0
+            else:
+                sim.replay_mode = False
+                sim.replay_positions = []
+                sim.replay_index = 0
+
+            dt = 1.0 / FPS
+            n_frames = int(duration_s * FPS)
+            if algorithm_key == "q_learning":
+                policy_state["ql_total_frames"] = n_frames
+                policy_state["ql_frame"] = 0
+
+            sim.reset_monte_carlo_trial_state()
+
             for frame in range(n_frames):
                 sim.update_ue_kinematics(dt)
-                if algorithm_key in {"my_algorithm", "ab_no_survival", "ab_no_aoi", "ab_no_load", "ab_reactive_only", "ab_no_relay"}:
+                if algorithm_key in {
+                    "my_algorithm",
+                    "ab_no_survival",
+                    "ab_no_aoi",
+                    "ab_no_load",
+                    "ab_reactive_only",
+                    "ab_no_relay",
+                }:
                     measurements = sim.update_handoff_logic()
                 else:
                     measurements = {t: sim.calculate_measurement(t, sim.ue_pos, sim.ue_velocity) for t in sim.towers}
@@ -1775,7 +2739,11 @@ class MonteCarloEvaluator:
                 if sim.replay_mode and sim.replay_index >= len(sim.replay_positions):
                     break
         finally:
-            self._restore_ablation_knobs(knobs_snapshot)
+            sim.handoff_margin_db, sim.handoff_hold_s = pre_debug_m, pre_debug_h
+            if owns_sim:
+                import pygame
+
+                pygame.quit()
 
         handoff_count = len(handoff_events)
 
@@ -1828,6 +2796,7 @@ class MonteCarloEvaluator:
             "greedy_rss",
             "q_learning",
             "mpc_lookahead",
+            "velocity_aided_rss",
             "ab_no_survival",
             "ab_no_aoi",
             "ab_no_load",
@@ -1850,6 +2819,8 @@ class MonteCarloEvaluator:
             state["robust_a3"] = RobustA3Baseline()
         if algorithm_key == "mpc_lookahead":
             state["mpc"] = MPCLookaheadBaseline()
+        if algorithm_key == "velocity_aided_rss":
+            state["velocity_aided"] = VelocityBiasedRSSBaseline()
         return state
 
     def _execute_handoff(
@@ -1914,25 +2885,38 @@ class MonteCarloEvaluator:
                 self._execute_handoff(sim, chosen, "MPC")
             return
 
+        if algorithm_key == "velocity_aided_rss":
+            vb: VelocityBiasedRSSBaseline = policy_state["velocity_aided"]
+            chosen, did, _ = vb.decide(sim, measurements)
+            if did:
+                self._execute_handoff(sim, chosen, "VELAID")
+            return
+
         if algorithm_key == "q_learning":
             agent: QLearningHandoff = policy_state["agent"]
             speed_mps = (sim.ue_velocity[0] ** 2 + sim.ue_velocity[1] ** 2) ** 0.5
             serving = sim.current_tower
             serving_m = measurements[serving]
-            state = agent.discretize(serving_m.rss_dbm, speed_mps, serving_m.distance_m)
-            action = agent.choose_action(state)
+            strongest = max(sim.towers, key=lambda t: measurements[t].rss_dbm)
+            margin_db = measurements[strongest].rss_dbm - serving_m.rss_dbm
+            state = agent.discretize(serving_m.rss_dbm, speed_mps, serving_m.distance_m, margin_db)
+            policy_state["ql_frame"] = policy_state.get("ql_frame", 0) + 1
+            nt = max(1, int(policy_state.get("ql_total_frames", 1)))
+            eps = agent.epsilon_for_step(policy_state["ql_frame"], nt)
+            action = agent.choose_action(state, eps)
 
-            # AoI-aligned reward for fairer comparison with AoI-centric metrics.
             reward = -sim.aoi_age_s
-            reward -= 0.15 if action != serving else 0.0
-            reward -= 0.35 if measurements[action].rss_dbm < OUTAGE_RSS_THRESHOLD_DBM else 0.0
+            reward -= 0.12 if action != serving else 0.0
+            reward -= 0.40 if measurements[action].rss_dbm < OUTAGE_RSS_THRESHOLD_DBM else 0.0
 
             if action != serving:
                 self._execute_handoff(sim, action, "QLEARN")
 
             next_serving = sim.current_tower
             next_m = measurements[next_serving]
-            next_state = agent.discretize(next_m.rss_dbm, speed_mps, next_m.distance_m)
+            strongest_n = max(sim.towers, key=lambda t: measurements[t].rss_dbm)
+            margin_n = measurements[strongest_n].rss_dbm - next_m.rss_dbm
+            next_state = agent.discretize(next_m.rss_dbm, speed_mps, next_m.distance_m, margin_n)
             agent.update(state, action, reward, next_state)
             return
 
@@ -1947,6 +2931,7 @@ class MonteCarloEvaluator:
         scenario: Optional[str] = None,
         weather_mode: Optional[str] = None,
         packet_profile: Optional[str] = None,
+        policy_weight_override: Optional[Dict[str, float]] = None,
     ) -> Dict:
         """
         Run Monte Carlo simulation with n_trials.
@@ -1968,23 +2953,31 @@ class MonteCarloEvaluator:
         print(f"Running Monte Carlo: {n_trials} trials, pattern={trajectory_pattern}, algo={algorithm}{env_str}")
         print("-" * 70)
 
-        for i in range(n_trials):
-            seed = base_seed + i if base_seed is not None else None
-            result = self.run_single_trial(
-                trial_id=i,
-                duration_s=duration_s,
-                trajectory_pattern=trajectory_pattern,
-                algorithm=algorithm,
-                seed=seed,
-                debug_mode=debug_mode,
-                scenario=scenario,
-                weather_mode=weather_mode,
-                packet_profile=packet_profile,
-            )
-            all_results.append(result)
+        import pygame
 
-            if (i + 1) % 10 == 0:
-                print(f"  Completed {i + 1}/{n_trials} trials...")
+        sim = V2XSmartHandoffSimulator(headless=CONFIG.headless_monte_carlo)
+        try:
+            for i in range(n_trials):
+                seed = base_seed + i if base_seed is not None else None
+                result = self.run_single_trial(
+                    trial_id=i,
+                    duration_s=duration_s,
+                    trajectory_pattern=trajectory_pattern,
+                    algorithm=algorithm,
+                    seed=seed,
+                    debug_mode=debug_mode,
+                    scenario=scenario,
+                    weather_mode=weather_mode,
+                    packet_profile=packet_profile,
+                    sim=sim,
+                    policy_weight_override=policy_weight_override,
+                )
+                all_results.append(result)
+
+                if (i + 1) % 10 == 0:
+                    print(f"  Completed {i + 1}/{n_trials} trials...")
+        finally:
+            pygame.quit()
 
         avg_aoi_values = [r["avg_aoi"] for r in all_results]
         peak_aoi_values = [r["peak_aoi"] for r in all_results]
@@ -2129,6 +3122,19 @@ if __name__ == "__main__":
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from config import CONFIG
+
+# Primary inferential metrics for paper-facing CSV subset (see docs/ANALYSIS_PROTOCOL.md).
+PRIMARY_STATISTICAL_METRICS = frozenset(
+    {
+        "avg_aoi_external",
+        "peak_aoi_external",
+        "handoff_count",
+        "ping_pong_count",
+        "outage_time_s",
+    }
+)
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -2182,7 +3188,10 @@ def plot_cdf_comparison(results_list: List[Dict], metric: str, output_path: str,
     colors = ["#2E86AB", "#A23B72", "#F18F01", "#C73E1D", "#6A994E"]
 
     for idx, result in enumerate(results_list):
-        values = [r[metric] for r in result["all_results"]]
+        raw = [r.get(metric) for r in result["all_results"]]
+        values = [float(v) for v in raw if v is not None and isinstance(v, (int, float)) and np.isfinite(v)]
+        if not values:
+            continue
         sorted_vals = np.sort(values)
         cdf = np.arange(1, len(sorted_vals) + 1) / len(sorted_vals)
 
@@ -2224,7 +3233,8 @@ def plot_boxplot_comparison(results_list: List[Dict], metric: str, output_path: 
     labels = []
 
     for result in results_list:
-        values = [r[metric] for r in result["all_results"]]
+        raw = [r.get(metric) for r in result["all_results"]]
+        values = [float(v) for v in raw if v is not None and isinstance(v, (int, float)) and np.isfinite(v)]
         data.append(values)
         labels.append(f"{result['algorithm']}\n(n={len(values)})")
 
@@ -2300,14 +3310,47 @@ def plot_time_series_example(result: Dict, output_path: str, n_samples: int = 10
     print(f"Time series plot saved: {output_path}")
 
 
+def _cliffs_delta(data1: List[float], data2: List[float]) -> float:
+    """
+    Cliff's delta effect size for two groups (nonparametric; suitable for discrete counts).
+    Returns (prop(x1 > x2) - prop(x1 < x2)) over all pairs; in [-1, 1].
+    """
+    x = np.asarray(data1, dtype=float)
+    y = np.asarray(data2, dtype=float)
+    if x.size == 0 or y.size == 0:
+        return float("nan")
+    greater = 0
+    less = 0
+    for a in x:
+        greater += int(np.sum(a > y))
+        less += int(np.sum(a < y))
+    denom = x.size * y.size
+    return (greater - less) / denom if denom else float("nan")
+
+
+def _cliffs_delta_magnitude_label(d: float) -> str:
+    if not np.isfinite(d):
+        return ""
+    ad = abs(d)
+    if ad < 0.147:
+        return "negligible"
+    if ad < 0.33:
+        return "small"
+    if ad < 0.474:
+        return "medium"
+    return "large"
+
+
 def _bootstrap_mean_diff_ci(
     data1: List[float],
     data2: List[float],
-    n_resamples: int = 9999,
+    n_resamples: Optional[int] = None,
     confidence_level: float = 0.95,
     random_state: int = 0,
 ) -> Tuple[float, float]:
     """Percentile bootstrap CI for independent-sample mean difference (mean1 - mean2)."""
+    if n_resamples is None:
+        n_resamples = CONFIG.bootstrap_n_resamples
     d1 = np.asarray(data1, dtype=float)
     d2 = np.asarray(data2, dtype=float)
     if d1.size < 2 or d2.size < 2:
@@ -2339,7 +3382,7 @@ def _bootstrap_mean_diff_ci(
 def _bootstrap_hodges_lehmann_ci(
     data1: List[float],
     data2: List[float],
-    n_resamples: int = 9999,
+    n_resamples: Optional[int] = None,
     confidence_level: float = 0.95,
     random_state: int = 0,
 ) -> Tuple[float, float, float]:
@@ -2347,6 +3390,8 @@ def _bootstrap_hodges_lehmann_ci(
     Hodges–Lehmann shift (median of pairwise differences, sample 1 minus sample 2)
     and a percentile bootstrap CI, aligned with rank-based two-sample tests.
     """
+    if n_resamples is None:
+        n_resamples = CONFIG.bootstrap_n_resamples
     d1 = np.asarray(data1, dtype=float)
     d2 = np.asarray(data2, dtype=float)
     if d1.size < 2 or d2.size < 2:
@@ -2588,15 +3633,33 @@ def run_targeted_proposed_vs_a3_all_cells(
     return df
 
 
-def run_statistical_tests(results_list: List[Dict], output_path: str):
+def run_statistical_tests(
+    results_list: List[Dict],
+    output_path: str,
+    primary_output_path: Optional[str] = None,
+):
     """
     Pairwise comparisons: Mann–Whitney U for count metrics (skewed/discrete),
     Welch's t-test for continuous metrics. Reported effect and bootstrap CI match the
     scale of the test: Hodges–Lehmann median difference (bootstrap CI) for counts,
     mean difference (bootstrap CI) for continuous metrics. Mean-based bootstrap CIs
     are still recorded as ``mean_diff`` / ``bootstrap_ci_diff_*`` for all metrics.
+
+    For discrete count metrics, **Cohen's d is omitted** (NaN): mean/std-based d can
+    explode when variances are tiny; use **Cliff's delta** instead (``cliffs_delta``).
+
+    If ``primary_output_path`` is set, a second CSV is written containing only rows
+    whose metric is in ``PRIMARY_STATISTICAL_METRICS`` (external AoI + churn + outage).
     """
-    metrics = ["avg_aoi", "peak_aoi", "handoff_count", "ping_pong_count", "outage_time_s"]
+    metrics = [
+        "avg_aoi_external",
+        "peak_aoi_external",
+        "avg_aoi",
+        "peak_aoi",
+        "handoff_count",
+        "ping_pong_count",
+        "outage_time_s",
+    ]
     count_metrics = frozenset({"handoff_count", "ping_pong_count"})
     report = []
 
@@ -2693,16 +3756,22 @@ def run_statistical_tests(results_list: List[Dict], output_path: str):
                         effect_label = "Mean difference (bootstrap 95% CI)"
 
                     pooled_std = np.sqrt((np.std(data1) ** 2 + np.std(data2) ** 2) / 2)
-                    cohens_d = mean_diff / pooled_std if pooled_std > 0 else 0.0
+                    if metric in count_metrics:
+                        cohens_d = float("nan")
+                        cliffs = _cliffs_delta(data1, data2)
+                        effect_size = _cliffs_delta_magnitude_label(cliffs)
+                    else:
+                        cliffs = float("nan")
+                        cohens_d = mean_diff / pooled_std if pooled_std > 0 else 0.0
+                        effect_size = (
+                            "large"
+                            if abs(cohens_d) > 0.8
+                            else "medium"
+                            if abs(cohens_d) > 0.5
+                            else "small"
+                        )
 
                     significance = "SIGNIFICANT" if p_value < 0.05 else "NOT significant"
-                    effect_size = (
-                        "large"
-                        if abs(cohens_d) > 0.8
-                        else "medium"
-                        if abs(cohens_d) > 0.5
-                        else "small"
-                    )
 
                     print(f"  {algo1} vs {algo2}:")
                     print(f"    test:        {test_type}")
@@ -2717,7 +3786,13 @@ def run_statistical_tests(results_list: List[Dict], output_path: str):
                         f"    mean diff:   {mean_diff:.6f}  "
                         f"95% bootstrap CI (mean): [{boot_lo:.6f}, {boot_hi:.6f}]"
                     )
-                    print(f"    Cohen's d:   {cohens_d:.4f} ({effect_size} effect)")
+                    if metric in count_metrics:
+                        print(
+                            f"    Cliff's d:   {cliffs:.4f} ({effect_size}) "
+                            f"(Cohen's d omitted for discrete counts)"
+                        )
+                    else:
+                        print(f"    Cohen's d:   {cohens_d:.4f} ({effect_size} effect)")
 
                     report.append(
                         {
@@ -2740,6 +3815,7 @@ def run_statistical_tests(results_list: List[Dict], output_path: str):
                             "effect_ci_high": eff_hi,
                             "effect_label": effect_label,
                             "cohens_d": cohens_d,
+                            "cliffs_delta": cliffs,
                             "effect_size": effect_size,
                             "p_value_corrected_holm": 1.0,
                             "significant_corrected_holm": False,
@@ -2767,6 +3843,13 @@ def run_statistical_tests(results_list: List[Dict], output_path: str):
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
 
+    if primary_output_path:
+        primary_df = df[df["metric"].isin(PRIMARY_STATISTICAL_METRICS)]
+        ppath = Path(primary_output_path)
+        ppath.parent.mkdir(parents=True, exist_ok=True)
+        primary_df.to_csv(ppath, index=False)
+        print(f"Primary-endpoint subset saved to: {primary_output_path}")
+
     print("\n" + "=" * 80)
     print(f"Full report saved to: {output_path}")
     print("=" * 80 + "\n")
@@ -2776,13 +3859,15 @@ def run_statistical_tests(results_list: List[Dict], output_path: str):
 
 def plot_all_metrics_boxplots(results_list: List[Dict], output_dir: str):
     """
-    Generate boxplots for ALL core metrics in one figure.
+    Generate boxplots for core metrics in one figure (external AoI first, then exploratory internal AoI).
     """
     metrics = [
-        ("avg_aoi", "Average AoI (s)"),
-        ("peak_aoi", "Peak AoI (s)"),
-        ("handoff_count", "Handoff Count"),
-        ("outage_time_s", "Outage Time (s)"),
+        ("avg_aoi_external", "Avg external AoI (s) — primary"),
+        ("peak_aoi_external", "Peak external AoI (s) — primary"),
+        ("avg_aoi", "Avg internal AoI (s) — exploratory"),
+        ("peak_aoi", "Peak internal AoI (s) — exploratory"),
+        ("handoff_count", "Handoff count"),
+        ("outage_time_s", "Outage time (s)"),
     ]
 
     # Aggregate per algorithm label
@@ -2791,7 +3876,7 @@ def plot_all_metrics_boxplots(results_list: List[Dict], output_dir: str):
         grouped.setdefault(result["algorithm"], []).append(result)
     algorithms = sorted(grouped.keys())
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
     axes = axes.flatten()
 
     colors = ["#2E86AB", "#A23B72", "#F18F01", "#C73E1D", "#6A994E"]
@@ -2802,7 +3887,10 @@ def plot_all_metrics_boxplots(results_list: List[Dict], output_dir: str):
         for algo in algorithms:
             values = []
             for result in grouped[algo]:
-                values.extend([trial[metric] for trial in result["all_results"]])
+                for trial in result["all_results"]:
+                    v = trial.get(metric)
+                    if v is not None and isinstance(v, (int, float)) and np.isfinite(float(v)):
+                        values.append(float(v))
             data.append(values)
             labels.append(f"{algo}\n(n={len(values)})")
 
@@ -2846,57 +3934,6 @@ numpy>=1.24.0
 scipy>=1.11.0
 seaborn>=0.12.0
 pandas>=2.0.0
-</file>
-
-<file path="test_handoff.py">
-import sys
-
-sys.path.append("src")
-import main as sim_main
-from monte_carlo_runner import MonteCarloEvaluator
-
-
-def run_controlled_handoff_test() -> None:
-    # Temporary stress settings to validate trigger path.
-    sim_main.HANDOFF_MARGIN_DB = 1.5
-    sim_main.HANDOFF_HOLD_S = 0.15
-
-    evaluator = MonteCarloEvaluator(base_scenario="urban_canyon")
-    result = evaluator.run_single_trial(
-        trial_id=0,
-        duration_s=30.0,
-        trajectory_pattern="linear",
-        algorithm="my_algorithm",
-        seed=123,
-        debug_mode=True,
-    )
-
-    print("=== CONTROLLED HANDOFF TEST ===")
-    print(f"Handoffs: {result['handoff_count']}")
-    print(f"Ping-pong: {result['ping_pong_count']}")
-    print(f"Avg AoI: {result['avg_aoi']:.4f}s")
-    print(f"Peak AoI: {result['peak_aoi']:.4f}s")
-    print(f"Outage: {result['outage_time_s']:.4f}s")
-    print(f"Avg RSS: {result['avg_rss_dbm']:.2f} dBm")
-
-    if result["handoff_count"] == 0:
-        print("Result: 0 handoffs in controlled mode -> investigate trigger conditions further.")
-    else:
-        print("Result: handoff logic is active under controlled conditions.")
-
-
-if __name__ == "__main__":
-    run_controlled_handoff_test()
-</file>
-
-<file path=".gitignore">
-__pycache__/
-*.pyc
-.venv/
-
-# Simulation / evaluation artifacts (regenerate with compare_algorithms.py or src/main.py)
-outputs/**/*.csv
-outputs/**/*.png
 </file>
 
 <file path="docs/ARCHITECTURE.md">
@@ -2976,24 +4013,23 @@ Two forecasting modes are available:
 - `velocity` mode: direct extrapolation from measured UE velocity.
 - `kalman` mode: alpha-beta style constant-velocity filtering and prediction.
 
-### Risk-Aware Survival Policy
+### Risk-Aware Lookahead (“Survival” Heuristic)
 
-- A survival score is evaluated per tower over a future window.
+- A **connectivity survival heuristic** is evaluated per tower over a future window (not Cox/Kaplan–Meier survival analysis).
 - At each step in the window, outage probability is estimated from predicted RSS.
-- The algorithm prefers the tower with the highest expected connectivity survival (with RSS as a tie-strength term).
+- The algorithm prefers the tower with the highest heuristic score (with RSS as a tie-strength term).
 - This can intentionally pick a currently weaker tower when it is predicted to remain stable while a stronger one is about to be blocked.
 
-### AoI-Driven Semantic Cognitive Handoff
+### Urgency-Aware Composite Handoff (implementation: “semantic” score in code)
 
-- Data urgency profile can be switched between:
-  - `critical` (strict freshness target)
-  - `standard` (relaxed freshness target)
+- Paper wording: **urgency-aware composite utility** (not information-theoretic semantic communication).
+- Data urgency profile: `critical` (strict freshness target) vs `standard` (relaxed).
 - For each candidate tower, the policy estimates:
-  - predicted RSS/survival
+  - predicted RSS / connectivity-survival heuristic
   - predicted tower congestion (load)—**synthetic** load trace in the simulator, not measured congestion
   - projected Age of Information ratio
   - handoff latency spike cost
-- Final tower choice is a semantic score balancing urgency vs quality, not RSS alone.
+- Final tower choice is a weighted composite score, not RSS alone.
 
 ### Cooperative V2V Relay Fallback
 
@@ -3087,8 +4123,8 @@ A simulation framework for studying proactive handoff algorithms in V2X networks
 
 ## Research Contributions
 
-- Predictive handoff with survival-aware scoring
-- AoI-driven semantic utility optimization
+- Predictive handoff with a **short-horizon connectivity survival heuristic** (RSS-based lookahead; not parametric survival analysis)
+- **Urgency-aware composite utility** (predicted RSS, synthetic load, projected AoI ratio); see `docs/PAPER_POSITIONING.md` for reviewer-facing wording
 - V2V relay fallback for outage resilience
 
 ## Citation
@@ -3112,7 +4148,7 @@ This is a **simulation study** using a **2D geometric channel model**. Results s
 - Smart handoff with hysteresis + hold timer
 - Predictive handoff (velocity and Kalman options)
 - Risk-aware survival handoff using **predicted UE motion**, **predicted blocker positions with additive Gaussian noise** (noisy future-state geometry), and **near-future RSS**—not a calibrated network digital twin
-- AoI-driven semantic handoff (`critical` vs `standard` packet urgency)
+- Urgency-aware handoff (`critical` vs `standard` packet profiles; composite score, not information-theoretic semantic communication)
 - Predicted tower congestion-aware decision scoring
 - Handoff latency spike cost modeling (switches are no longer "free")
 - V2V relay fallback path for near-outage moments
@@ -3141,7 +4177,7 @@ The simulator contains three layers:
 
 See `docs/ARCHITECTURE.md` for details.
 
-**Paper / evaluation:** Pre-specified **primary endpoint = external AoI** (independent RSS-threshold packet process); secondary = handoffs, ping-pong, outage, etc. See **`docs/PRIMARY_AND_SECONDARY_ENDPOINTS.md`** for wording templates.
+**Paper / evaluation:** Pre-specified **primary endpoint = external AoI** (independent RSS-threshold packet process); secondary = handoffs, ping-pong, outage, etc. See **`docs/PRIMARY_AND_SECONDARY_ENDPOINTS.md`**, **`docs/ANALYSIS_PROTOCOL.md`** (primary vs exploratory), and **`docs/PAPER_POSITIONING.md`** (terminology, fading, `random_walk` caveat).
 
 ## Controls
 
@@ -3163,7 +4199,7 @@ See `docs/ARCHITECTURE.md` for details.
 
 ## Reproducibility (paper)
 
-Frozen **software pins, seeds, channel/handoff constants, and ablation weight snapshots** for an appendix or supplementary table: **`config_reproducibility.py`** (`REPRODUCIBILITY_CONFIG`). Update the recorded Python version with `python --version` before submission.
+Frozen **software pins, seeds, channel/handoff constants, and ablation weight snapshots** for an appendix or supplementary table: **`config_reproducibility.py`** (`REPRODUCIBILITY_CONFIG`). For exact dependency versions from a machine that ran the experiments, use **`requirements-lock.txt`** (`pip freeze`). Update the recorded Python version with `python --version` before submission.
 
 ## Install
 
@@ -3173,6 +4209,8 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+**Tests (optional):** `pip install -r requirements-dev.txt` then `python -m pytest tests/`.
+
 ## Run
 
 ```bash
@@ -3181,16 +4219,38 @@ python src/main.py
 
 ## Factorial evaluation (`compare_algorithms.py`)
 
-`python compare_algorithms.py` runs a **full factorial** over map scenarios (`baseline`, `urban_canyon`, `intersection`), **weather** (`clear`, `rain`, `fog`, `storm`), **packet profile** (`critical`, `standard`), and **trajectory** (`random_walk`, `linear`, `circular`). **Urban canyon** cells use **`PRIMARY_TRIALS`** (100) per algorithm run for statistical power on the pre-specified primary contrasts; **baseline** and **intersection** cells use **`SECONDARY_TRIALS`** (25). Pass `n_trials=` to `run_comprehensive_comparison()` to force one count for every cell (e.g. quick tests).
+**Runtime:** The default **full** factorial is **120 cells** (5 trajectories × 3 scenarios × 4 weathers × 2 profiles) × **7 algorithms** × up to **100 trials** × **30 s** simulated time × 60 FPS — expect **many hours**. For development, use:
 
-Outputs include **`outputs/subgroup_proposed_aoi.csv`** (proposed AoI per trajectory), **`outputs/subgroup_analysis_table.csv`** (paper-style subgroup table: Scenario / Weather / Profile, **Proposed vs A3** mean AoI aggregated over the three trajectories, **Improvement** = \((\mathrm{A3}-\mathrm{Proposed})/\mathrm{A3}\) as percent with **↓**), **`outputs/targeted_proposed_vs_a3_tests.csv`** (pre-specified **Proposed vs A3** tests only—trial-level, trajectories pooled—aligned with that subgroup table), **`outputs/primary_family_tests.csv`** (pre-specified **primary endpoint family**: external AoI, Proposed vs Robust A3+, three trajectories, **Holm** across that set only), **`outputs/comparison_factorial/…`** (per-cell CDF/boxplots), and **`outputs/statistical_tests.csv`** (all pairwise tests **within** each pattern × environment cell; interpret as exploratory except where covered by the primary family). Summary boxplots in **`outputs/comparison_all_metrics/`** use **urban_canyon / clear / critical** by default so figures are not mixed across all 24 environment cells.
+```bash
+python compare_algorithms.py --quick
+```
+
+**Quick mode** runs only **3** trajectories × **1** environment (`urban_canyon`, `clear`, `critical`) × **20** trials × **15 s** sim (~100×+ fewer frame-equivalents than the full grid). Optional: `--slim-baselines` (drops greedy + Q-learning), `--n-trials 8`, `--duration-s 10`.
+
+`python compare_algorithms.py` (no flags) runs the **full factorial** over map scenarios (`baseline`, `urban_canyon`, `intersection`), **weather** (`clear`, `rain`, `fog`, `storm`), **packet profile** (`critical`, `standard`), and **trajectory** patterns in `compare_algorithms.TRAJECTORY_PATTERNS`. **Pre-specified primary inference** uses a subset of trajectories; erratic patterns such as `random_walk` may interact differently with policies—discuss in paper if contrasts differ (see `docs/PAPER_POSITIONING.md`). **Urban canyon** cells use **`PRIMARY_TRIALS`** (100) per algorithm; **baseline** and **intersection** use **`SECONDARY_TRIALS`** (25). Pass `n_trials=` to `run_comprehensive_comparison()` to force one count for every cell.
+
+Outputs include **`outputs/subgroup_proposed_aoi.csv`** (per-trajectory proposed metrics; **external AoI** columns are primary), **`outputs/subgroup_analysis_table.csv`** (**primary:** Proposed vs A3 **external** AoI mean over trajectories + **Improvement_External**; **exploratory:** internal AoI columns), **`outputs/statistical_tests.csv`** (all metrics: external + internal AoI, handoffs, etc.; **Cohen’s d omitted for discrete counts**, **Cliff’s delta** reported), **`outputs/statistical_tests_primary_endpoints.csv`** (same grid, **paper-facing subset**: external AoI + churn + outage only), **`outputs/targeted_proposed_vs_a3_tests.csv`** (Proposed vs A3; metrics include external AoI first), **`outputs/primary_family_tests.csv`** (pre-specified **primary inferential family**: external AoI, Proposed vs Robust A3+, three trajectories, **Holm** only across that set), **`outputs/comparison_factorial/…`** (CDFs/boxplots including **avg_aoi_external**), and summary boxplots in **`outputs/comparison_all_metrics/`** filtered to **urban_canyon / clear / critical** by default.
+
+**Sensitivity (appendix):** `python sensitivity_sweep.py` → `outputs/sensitivity_sweep_summary.csv` (one-at-a-time channel / utility knobs).
+
+**Ablation figures (appendix):**
+```bash
+python compare_algorithms.py --ablation
+```
+Defaults: 50 trials × 30 s × five trajectories (long). Faster appendix pass:
+```bash
+python compare_algorithms.py --ablation --ablation-trials 20 --ablation-duration 15 --ablation-patterns random_walk,linear,circular
+```
+Writes `outputs/ablation_<pattern>/` (CDFs + boxplots), `outputs/statistical_tests_ablation*.csv`, `outputs/ablation_all_metrics/`.
 
 Pass `full_factorial=False` to `run_comprehensive_comparison()` for a quick three-pattern run with default simulator weather/profile (still uses primary trial count on urban_canyon). Pass `n_trials=25` for a uniform low count everywhere.
 
 ## Technical Notes
 
 - **Robust A3+ baseline** (`robust_a3` / `a3+`): same TTT/hysteresis structure as A3, but candidate ranking uses **load-adjusted RSS** (`RSS − load_offset × load`) vs raw serving RSS; stronger than plain greedy RSS.
-- **MPC lookahead baseline** (`mpc` / `mpc_lookahead`): sums predicted RSS over a short horizon (default 1 s, step 0.1 s) using `get_predicted_position` and `calculate_measurement` with `future_s`; subtracts a one-time **handoff cost** (dB) at step 0 when changing cells.
+- **MPC lookahead baseline** (`mpc` / `mpc_lookahead`): sums predicted RSS over a short horizon (**default 0.8 s** aligned with `PREDICT_LOOKAHEAD_S`, step 0.1 s) using `get_predicted_position` and `calculate_measurement` with `future_s`; subtracts a one-time **handoff cost** (default **5 dB**) at step 0 when changing cells.
+- **Velocity-aided RSS baseline** (`velocity_aided`): lookahead RSS ranking + hysteresis/TTT (literature-style mobility hint without the full proposed composite score).
+- **GUI vs Monte Carlo fading:** interactive runs default to **no** small-scale fading (`config.enable_small_scale_fading`); headless Monte Carlo defaults to **Rician/Rayleigh on** (`monte_carlo_enable_small_scale_fading`). State both in paper methods—see `docs/PAPER_POSITIONING.md`.
 - Frequency: 5.9 GHz (typical ITS band usage context)
 - RSS model: log-distance path loss approximation
 - Shadowing: fixed 20 dB attenuation when LOS intersects a building rectangle
@@ -3244,6 +4304,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# Repo root (config.py lives next to src/, not inside it)
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import numpy as np
 import pygame
 
@@ -3293,6 +4358,13 @@ CRITICAL_AOI_DEADLINE_S = 0.010
 STANDARD_AOI_DEADLINE_S = 1.0
 RELAY_OUTAGE_GUARD_DBM = -92.0
 RELAY_PENALTY_DB = 6.0
+
+# Invisible background UEs per tower (birth–death sessions → cross-traffic load share).
+BACKGROUND_LOAD_PER_SESSION = 0.058
+BACKGROUND_CROSS_LOAD_CAP = 0.52
+BACKGROUND_SESSION_BIRTH_RATE = 2.6
+BACKGROUND_SESSION_DEATH_RATE = 0.38
+BACKGROUND_MAX_SESSIONS = 14
 PACKET_SUCCESS_RSS_REF_DBM = -82.0
 PACKET_SUCCESS_SLOPE_DB = 4.5
 PACKET_SUCCESS_MIN_PROB = 0.02
@@ -3302,6 +4374,9 @@ TELEMETRY_SAMPLE_EVERY_N_FRAMES = 1
 TELEMETRY_MAX_ROWS = 50_000
 
 # Ablation/control knobs (used by evaluation scripts).
+# Paper wording: **urgency-aware composite utility** (survival-style lookahead term,
+# predicted RSS, synthetic load, projected AoI ratio). Identifier prefix ``SEMANTIC_W_*``
+# is historical; see docs/PAPER_POSITIONING.md.
 SEMANTIC_W_SURVIVAL = 1.00
 SEMANTIC_W_PREDICTED_RSS = 0.22
 SEMANTIC_W_LOAD = 0.60
@@ -3532,6 +4607,9 @@ class V2XSmartHandoffSimulator:
         self.last_aoi_scores: Dict[str, float] = {}
         self.last_semantic_scores: Dict[str, float] = {}
         self.tower_loads: Dict[str, float] = {}
+        self.scheduled_tower_loads: Dict[str, float] = {}
+        self.background_session_count: Dict[str, int] = {}
+        self.cross_traffic_load: Dict[str, float] = {}
         self.connection_mode = "tower"
         self.relay_tower_name = ""
         self.relay_name = ""
@@ -3544,8 +4622,47 @@ class V2XSmartHandoffSimulator:
         self.last_handoff_debug: Dict[str, object] = {}
         self.telemetry_frame_count = 0
 
+        self._init_policy_knobs_from_module_constants()
+
         OUTPUT_DIR.mkdir(exist_ok=True)
         self.apply_scenario("baseline")
+
+    def _init_policy_knobs_from_module_constants(self) -> None:
+        """Instance policy knobs (Monte Carlo ablations mutate these, not module globals)."""
+        self.semantic_w_survival = SEMANTIC_W_SURVIVAL
+        self.semantic_w_predicted_rss = SEMANTIC_W_PREDICTED_RSS
+        self.semantic_w_load = SEMANTIC_W_LOAD
+        self.semantic_w_aoi = SEMANTIC_W_AOI
+        self.enable_predictive_trigger = ENABLE_PREDICTIVE_TRIGGER
+        self.enable_relay_fallback = ENABLE_RELAY_FALLBACK
+        self.handoff_margin_db = HANDOFF_MARGIN_DB
+        self.handoff_hold_s = HANDOFF_HOLD_S
+        self.enable_small_scale_fading_override: Optional[bool] = None
+
+    def apply_policy_profile(self, profile: Dict[str, float | bool]) -> None:
+        """Apply a full knob dict (e.g. merged module defaults + ablation overrides)."""
+        self.semantic_w_survival = float(profile["w_survival"])
+        self.semantic_w_predicted_rss = float(profile["w_pred_rss"])
+        self.semantic_w_load = float(profile["w_load"])
+        self.semantic_w_aoi = float(profile["w_aoi"])
+        self.enable_predictive_trigger = bool(profile["enable_predictive_trigger"])
+        self.enable_relay_fallback = bool(profile["enable_relay_fallback"])
+
+    def reset_monte_carlo_trial_state(self) -> None:
+        """Reset per-trial dynamics when reusing one simulator across Monte Carlo trials."""
+        self.sim_time_s = 0.0
+        self.kalman = Kalman2D()
+        self.current_tower = self.towers[0]
+        self.candidate_tower = None
+        self.candidate_since = 0.0
+        self.handoff_spike_until = 0.0
+        self.aoi_age_s = 0.0
+        self.connection_mode = "tower"
+        self.relay_name = ""
+        self.relay_tower_name = ""
+        self.replay_index = 0
+        self.last_handoff_debug = {}
+        self.telemetry_frame_count = 0
 
     def push_event(self, message: str) -> None:
         ts = time.strftime("%H:%M:%S")
@@ -3674,7 +4791,7 @@ class V2XSmartHandoffSimulator:
             ]
             self.ue_pos = self.snap_to_safe_point(640, 680, radius=14)
             self.prev_ue_pos = self.ue_pos
-        self.tower_loads = {tower.name: random.uniform(0.2, 0.6) for tower in self.towers}
+        self._reset_tower_load_state_for_scenario()
         self.connection_mode = "tower"
         self.relay_name = ""
         self.relay_tower_name = ""
@@ -3753,20 +4870,60 @@ class V2XSmartHandoffSimulator:
         self.packet_profile = "standard" if self.packet_profile == "critical" else "critical"
         self.push_event(f"Packet profile: {self.packet_profile}")
 
+    def _reset_tower_load_state_for_scenario(self) -> None:
+        """Scheduled (slow) load plus invisible cross-traffic sessions per tower."""
+        self.scheduled_tower_loads = {tower.name: random.uniform(0.18, 0.58) for tower in self.towers}
+        self.background_session_count = {tower.name: random.randint(2, 9) for tower in self.towers}
+        self.cross_traffic_load = {}
+        self._sync_cross_load_from_session_counts()
+        self.tower_loads = {}
+        for tower in self.towers:
+            s = self.scheduled_tower_loads[tower.name]
+            c = self.cross_traffic_load[tower.name]
+            self.tower_loads[tower.name] = max(0.05, min(0.99, s + c))
+
+    def _sync_cross_load_from_session_counts(self) -> None:
+        for tower in self.towers:
+            n = int(self.background_session_count.get(tower.name, 0))
+            self.cross_traffic_load[tower.name] = min(
+                BACKGROUND_CROSS_LOAD_CAP,
+                n * BACKGROUND_LOAD_PER_SESSION,
+            )
+
+    def _step_invisible_background_sessions(self, dt: float) -> None:
+        if dt <= 0.0:
+            return
+        lam = BACKGROUND_SESSION_BIRTH_RATE * max(0.5, self.weather_entropy)
+        mu = BACKGROUND_SESSION_DEATH_RATE
+        survive_p = math.exp(-mu * dt)
+        for tower in self.towers:
+            n = int(self.background_session_count.get(tower.name, 0))
+            births = int(np.random.poisson(lam * dt))
+            survivors = sum(1 for _ in range(n) if random.random() < survive_p)
+            n = max(0, min(BACKGROUND_MAX_SESSIONS, survivors + births))
+            self.background_session_count[tower.name] = n
+        self._sync_cross_load_from_session_counts()
+
     def update_tower_loads(self, dt: float) -> None:
+        self._step_invisible_background_sessions(dt)
         for i, tower in enumerate(self.towers):
             now = self.sim_time_s
-            base = self.tower_loads.get(tower.name, 0.4)
+            base = self.scheduled_tower_loads.get(tower.name, 0.4)
             drift = math.sin(now * 0.45 + i * 1.1) * 0.02
             noise = random.gauss(0.0, 0.015 * self.weather_entropy)
-            nxt = max(0.05, min(0.98, base + drift + noise * max(0.3, dt * FPS / 60.0)))
-            self.tower_loads[tower.name] = nxt
+            nxt = max(0.05, min(0.92, base + drift + noise * max(0.3, dt * FPS / 60.0)))
+            self.scheduled_tower_loads[tower.name] = nxt
+            cross = self.cross_traffic_load.get(tower.name, 0.0)
+            self.tower_loads[tower.name] = max(0.05, min(0.99, nxt + cross))
 
     def predict_tower_load(self, tower: Tower, horizon_s: float = PREDICT_LOOKAHEAD_S) -> float:
         now = self.sim_time_s
         idx = next(i for i, t in enumerate(self.towers) if t.name == tower.name)
         trend = math.sin((now + horizon_s) * 0.45 + idx * 1.1) * 0.04
-        return max(0.05, min(0.99, self.tower_loads.get(tower.name, 0.4) + trend))
+        base_sched = self.scheduled_tower_loads.get(tower.name, 0.4)
+        pred_sched = max(0.05, min(0.92, base_sched + trend))
+        cross = self.cross_traffic_load.get(tower.name, 0.0)
+        return max(0.05, min(0.99, pred_sched + cross))
 
     def deadline_for_profile(self) -> float:
         return CRITICAL_AOI_DEADLINE_S if self.packet_profile == "critical" else STANDARD_AOI_DEADLINE_S
@@ -3958,7 +5115,12 @@ class V2XSmartHandoffSimulator:
             if self.blocker_intersects_link(blocker, (tower.x, tower.y), ue_pos, future_s=future_s):
                 rss_dbm -= self.blocker_shadow_drop(blocker, self.sim_time_s + future_s)
                 blocked = True
-        if CONFIG.enable_small_scale_fading:
+        fading_on = (
+            self.enable_small_scale_fading_override
+            if self.enable_small_scale_fading_override is not None
+            else CONFIG.enable_small_scale_fading
+        )
+        if fading_on:
             if blocked:
                 fading_amp = np.random.rayleigh(scale=1.0)
             else:
@@ -4005,6 +5167,7 @@ class V2XSmartHandoffSimulator:
         return max(PACKET_SUCCESS_MIN_PROB, min(PACKET_SUCCESS_MAX_PROB, p))
 
     def evaluate_survival_score(self, tower: Tower, horizon_s: float = SURVIVAL_WINDOW_S) -> float:
+        """Short-horizon connectivity survival heuristic (RSS outage hazard product); not parametric survival analysis."""
         samples = max(1, int(horizon_s / SURVIVAL_DT_S))
         survival = 1.0
         rss_acc = 0.0
@@ -4054,10 +5217,10 @@ class V2XSmartHandoffSimulator:
         load_scores = {t: self.predict_tower_load(t) for t in self.towers}
         aoi_scores = {t: self.projected_aoi_ratio(t, handoff=(t != self.current_tower)) for t in self.towers}
         semantic_scores = {
-            t: SEMANTIC_W_SURVIVAL * survival_scores[t]
-            + SEMANTIC_W_PREDICTED_RSS * ((predicted_scores[t] + 110.0) / 45.0)
-            - SEMANTIC_W_LOAD * load_scores[t]
-            - SEMANTIC_W_AOI * aoi_scores[t]
+            t: self.semantic_w_survival * survival_scores[t]
+            + self.semantic_w_predicted_rss * ((predicted_scores[t] + 110.0) / 45.0)
+            - self.semantic_w_load * load_scores[t]
+            - self.semantic_w_aoi * aoi_scores[t]
             for t in self.towers
         }
         self.last_risk_scores = {t.name: survival_scores[t] for t in self.towers}
@@ -4067,8 +5230,8 @@ class V2XSmartHandoffSimulator:
         predicted_best_tower = max(self.towers, key=lambda t: predicted_scores[t])
         survival_best_tower = max(self.towers, key=lambda t: survival_scores[t])
         semantic_best_tower = max(self.towers, key=lambda t: semantic_scores[t])
-        adaptive_margin = HANDOFF_MARGIN_DB + (self.weather_entropy - 1.0) * 2.0
-        predictive_pressure = predicted_scores[predicted_best_tower] - predicted_current >= HANDOFF_MARGIN_DB
+        adaptive_margin = self.handoff_margin_db + (self.weather_entropy - 1.0) * 2.0
+        predictive_pressure = predicted_scores[predicted_best_tower] - predicted_current >= self.handoff_margin_db
         survival_pressure = (
             survival_best_tower != self.current_tower
             and survival_scores[survival_best_tower] - survival_scores[self.current_tower] >= 0.08
@@ -4080,7 +5243,7 @@ class V2XSmartHandoffSimulator:
 
         trigger_by_margin = strongest != self.current_tower and (strongest_rss - current_rss >= adaptive_margin)
         trigger_predictive = (
-            ENABLE_PREDICTIVE_TRIGGER and predicted_best_tower != self.current_tower and predictive_pressure
+            self.enable_predictive_trigger and predicted_best_tower != self.current_tower and predictive_pressure
         )
         trigger_survival = survival_pressure
         trigger_semantic = semantic_pressure
@@ -4113,7 +5276,7 @@ class V2XSmartHandoffSimulator:
                 self.candidate_tower = chosen_candidate
                 self.candidate_since = self.sim_time_s
             else:
-                if self.sim_time_s - self.candidate_since >= HANDOFF_HOLD_S:
+                if self.sim_time_s - self.candidate_since >= self.handoff_hold_s:
                     old_name = self.current_tower.name
                     self.current_tower = chosen_candidate
                     self.handoff_spike_until = self.sim_time_s + HANDOFF_SPIKE_S
@@ -4126,7 +5289,7 @@ class V2XSmartHandoffSimulator:
                     self.push_event(f"{tag}HANDOFF {old_name} -> {self.current_tower.name}")
         else:
             self.candidate_tower = None
-        if ENABLE_RELAY_FALLBACK:
+        if self.enable_relay_fallback:
             self.evaluate_relay_fallback()
         else:
             self.connection_mode = "tower"
@@ -4266,7 +5429,7 @@ class V2XSmartHandoffSimulator:
 
     def evaluate_model(self, model: str, positions: List[Tuple[int, int]]) -> Dict[str, object]:
         dt = 1.0 / FPS
-        hold_frames = max(1, int(HANDOFF_HOLD_S * FPS))
+        hold_frames = max(1, int(self.handoff_hold_s * FPS))
         kalman = Kalman2D()
 
         current_tower = self.towers[0]
@@ -4304,10 +5467,14 @@ class V2XSmartHandoffSimulator:
                 t: self.calculate_measurement(t, ppos, vel).rss_dbm for t in self.towers
             }
             predicted_best = max(self.towers, key=lambda t: predicted_scores[t])
-            predictive_pressure = predicted_scores[predicted_best] - predicted_scores[current_tower] >= HANDOFF_MARGIN_DB
-
-            trigger_by_margin = strongest != current_tower and (strongest_rss - current_rss >= HANDOFF_MARGIN_DB)
-            trigger_predictive = predicted_best != current_tower and predictive_pressure
+            predictive_pressure = (
+                predicted_scores[predicted_best] - predicted_scores[current_tower] >= self.handoff_margin_db
+            )
+            adaptive_margin = self.handoff_margin_db + (self.weather_entropy - 1.0) * 2.0
+            trigger_by_margin = strongest != current_tower and (strongest_rss - current_rss >= adaptive_margin)
+            trigger_predictive = (
+                self.enable_predictive_trigger and predicted_best != current_tower and predictive_pressure
+            )
             should_consider = trigger_by_margin or trigger_predictive
             chosen_candidate = strongest if trigger_by_margin else predicted_best
 

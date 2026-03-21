@@ -142,14 +142,81 @@ class GreedyRSSBaseline:
         return current_tower, False, None
 
 
+class VelocityBiasedRSSBaseline:
+    """
+    Velocity-aided handoff: compare each tower's RSS at a short kinematic lookahead
+    (same ``get_predicted_position`` / ``calculate_measurement`` API as the simulator)
+    against the serving cell's lookahead RSS, with hysteresis + TTT—similar in spirit
+    to mobility-assisted neighbor ranking, without the full proposed composite score.
+    """
+
+    def __init__(
+        self,
+        lookahead_s: float = 0.8,
+        hysteresis_db: float = 3.0,
+        time_to_trigger_s: float = 0.5,
+    ):
+        self.lookahead_s = float(lookahead_s)
+        self.hysteresis_db = float(hysteresis_db)
+        self.time_to_trigger_s = float(time_to_trigger_s)
+        self.candidate_tower: Optional[Tower] = None
+        self.candidate_start_time: Optional[float] = None
+
+    def reset(self) -> None:
+        self.candidate_tower = None
+        self.candidate_start_time = None
+
+    def _pred_rss(self, sim: V2XSmartHandoffSimulator, tower: Tower) -> float:
+        m = sim.calculate_measurement(
+            tower,
+            sim.get_predicted_position(self.lookahead_s),
+            sim.ue_velocity,
+            future_s=self.lookahead_s,
+        )
+        return m.rss_dbm
+
+    def decide(
+        self,
+        sim: V2XSmartHandoffSimulator,
+        measurements: Dict[Tower, Measurement],
+    ) -> Tuple[Tower, bool, Optional[str]]:
+        current = sim.current_tower
+        pred_serving = self._pred_rss(sim, current)
+        best = max(sim.towers, key=lambda t: self._pred_rss(sim, t))
+        pred_best = self._pred_rss(sim, best)
+
+        now_s = getattr(sim, "sim_time_s", None)
+        if now_s is None:
+            now_s = time.time()
+
+        if best != current and pred_best > pred_serving + self.hysteresis_db:
+            if self.candidate_tower != best:
+                self.candidate_tower = best
+                self.candidate_start_time = now_s
+            elif (
+                self.candidate_start_time is not None
+                and (now_s - self.candidate_start_time >= self.time_to_trigger_s)
+            ):
+                old_name = current.name
+                self.reset()
+                return best, True, f"VEL-AID HANDOFF {old_name} -> {best.name}"
+        else:
+            if self.candidate_tower == best:
+                self.reset()
+
+        return current, False, None
+
+
 class MPCLookaheadBaseline:
     """
     Short-horizon model-predictive style baseline: maximize sum of predicted RSS over
     ``horizon_s`` with step ``dt_s``, minus a one-time dB penalty if switching away
     from the serving cell at the first step (reduces ping-pong vs greedy).
+
+    Defaults align with simulator lookahead duration (``PREDICT_LOOKAHEAD_S`` ≈ 0.8 s).
     """
 
-    def __init__(self, horizon_s: float = 1.0, dt_s: float = 0.1, handoff_cost_db: float = 3.0):
+    def __init__(self, horizon_s: float = 0.8, dt_s: float = 0.1, handoff_cost_db: float = 5.0):
         self.horizon_s = float(horizon_s)
         self.dt_s = max(1e-6, float(dt_s))
         self.handoff_cost_db = float(handoff_cost_db)
