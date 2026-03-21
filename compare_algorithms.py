@@ -16,6 +16,7 @@ import pandas as pd
 from scipy import stats
 from scipy.stats import mannwhitneyu
 
+from config import CONFIG
 from monte_carlo_runner import MonteCarloEvaluator
 from plotting_utils import (
     _extract_trial_metric_values,
@@ -309,6 +310,7 @@ def run_comprehensive_comparison(
     quick: bool = False,
     duration_s: Optional[float] = None,
     slim_baselines: bool = False,
+    save_monte_carlo_csv: bool = True,
 ) -> List[Dict]:
     """
     Run all algorithms across trajectory patterns and, if ``full_factorial`` is True,
@@ -322,6 +324,10 @@ def run_comprehensive_comparison(
 
     By default, **urban_canyon** cells use ``PRIMARY_TRIALS`` and all other scenarios
     use ``SECONDARY_TRIALS``. Pass ``n_trials`` to force the same count in every cell.
+
+    ``save_monte_carlo_csv=False``: skip writing one summary CSV per algorithm per cell
+    (``monte_carlo_runner.save_results_to_csv``); factorial runs still keep in-memory
+    results for plots and statistics.
     """
     if duration_s is None:
         duration_s = QUICK_DEFAULT_DURATION_S if quick else 30.0
@@ -372,6 +378,11 @@ def run_comprehensive_comparison(
         )
     cell_idx = 0
 
+    import pygame
+    from main import V2XSmartHandoffSimulator
+
+    evaluator = MonteCarloEvaluator(base_scenario="urban_canyon")
+
     for pattern in patterns:
         for scenario, weather, profile in envs:
             cell_idx += 1
@@ -388,27 +399,34 @@ def run_comprehensive_comparison(
             print("=" * 70)
 
             pattern_results = []
-            evaluator = MonteCarloEvaluator(base_scenario=scenario or "urban_canyon")
-            for algo_name, algo_display in algorithms.items():
-                result = evaluator.run_monte_carlo(
-                    n_trials=cell_n_trials,
-                    duration_s=duration_s,
-                    trajectory_pattern=pattern,
-                    algorithm=algo_name,
-                    base_seed=base_seed,
-                    scenario=scenario,
-                    weather_mode=weather,
-                    packet_profile=profile,
-                )
-                result["display_name"] = algo_display
-                result["algorithm"] = algo_display
-                result["algorithm_key"] = algo_name
-                result["experiment_scenario"] = result.get("experiment_scenario")
-                result["weather_mode"] = result.get("weather_mode")
-                result["packet_profile"] = result.get("packet_profile")
-                pattern_results.append(result)
-                evaluator.save_results_to_csv(result)
-                all_results.append(result)
+            shared_sim = V2XSmartHandoffSimulator(headless=CONFIG.headless_monte_carlo)
+            shared_sim.enable_small_scale_fading_override = CONFIG.monte_carlo_enable_small_scale_fading
+            try:
+                for algo_name, algo_display in algorithms.items():
+                    result = evaluator.run_monte_carlo(
+                        n_trials=cell_n_trials,
+                        duration_s=duration_s,
+                        trajectory_pattern=pattern,
+                        algorithm=algo_name,
+                        base_seed=base_seed,
+                        scenario=scenario,
+                        weather_mode=weather,
+                        packet_profile=profile,
+                        sim=shared_sim,
+                        pygame_cleanup=False,
+                    )
+                    result["display_name"] = algo_display
+                    result["algorithm"] = algo_display
+                    result["algorithm_key"] = algo_name
+                    result["experiment_scenario"] = result.get("experiment_scenario")
+                    result["weather_mode"] = result.get("weather_mode")
+                    result["packet_profile"] = result.get("packet_profile")
+                    pattern_results.append(result)
+                    if save_monte_carlo_csv:
+                        evaluator.save_results_to_csv(result)
+                    all_results.append(result)
+            finally:
+                pygame.quit()
 
             proposed = next((r for r in pattern_results if r.get("algorithm_key") == "my_algorithm"), None)
             if proposed is not None:
@@ -499,10 +517,12 @@ def run_comprehensive_comparison(
     print("GENERATING STATISTICAL ANALYSIS (all factorial cells)")
     print("=" * 80)
 
+    boot_n = CONFIG.bootstrap_n_resamples_quick if quick else None
     stats_report = run_statistical_tests(
         all_results,
         output_path="outputs/statistical_tests.csv",
         primary_output_path="outputs/statistical_tests_primary_endpoints.csv",
+        bootstrap_n_resamples=boot_n,
     )
     _ = stats_report
 
@@ -512,6 +532,7 @@ def run_comprehensive_comparison(
     _ = run_targeted_proposed_vs_a3_all_cells(
         all_results,
         output_path="outputs/targeted_proposed_vs_a3_tests.csv",
+        bootstrap_n_resamples=boot_n,
     )
 
     print("\n" + "=" * 80)
@@ -588,29 +609,40 @@ def run_ablation_study(
         f"{n_trials} trials × {duration_s:.0f}s sim\n"
     )
 
+    import pygame
+    from main import V2XSmartHandoffSimulator
+
+    evaluator = MonteCarloEvaluator(base_scenario="urban_canyon")
+
     for pattern in patterns:
         print(f"\n{'=' * 70}")
         print(f"ABLATION TRAJECTORY PATTERN: {pattern.upper()}")
         print("=" * 70)
 
         pattern_results = []
-        evaluator = MonteCarloEvaluator(base_scenario="urban_canyon")
-        for algo_key, display_name in variants.items():
-            result = evaluator.run_monte_carlo(
-                n_trials=n_trials,
-                duration_s=duration_s,
-                trajectory_pattern=pattern,
-                algorithm=algo_key,
-                base_seed=base_seed,
-                scenario="urban_canyon",
-                weather_mode="clear",
-                packet_profile="critical",
-            )
-            result["display_name"] = display_name
-            result["algorithm"] = display_name
-            result["algorithm_key"] = algo_key
-            pattern_results.append(result)
-            evaluator.save_results_to_csv(result)
+        shared_sim = V2XSmartHandoffSimulator(headless=CONFIG.headless_monte_carlo)
+        shared_sim.enable_small_scale_fading_override = CONFIG.monte_carlo_enable_small_scale_fading
+        try:
+            for algo_key, display_name in variants.items():
+                result = evaluator.run_monte_carlo(
+                    n_trials=n_trials,
+                    duration_s=duration_s,
+                    trajectory_pattern=pattern,
+                    algorithm=algo_key,
+                    base_seed=base_seed,
+                    scenario="urban_canyon",
+                    weather_mode="clear",
+                    packet_profile="critical",
+                    sim=shared_sim,
+                    pygame_cleanup=False,
+                )
+                result["display_name"] = display_name
+                result["algorithm"] = display_name
+                result["algorithm_key"] = algo_key
+                pattern_results.append(result)
+                evaluator.save_results_to_csv(result)
+        finally:
+            pygame.quit()
 
         output_dir = Path("outputs") / f"ablation_{pattern}"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -689,6 +721,11 @@ if __name__ == "__main__":
         help="Drop greedy + Q-learning to save ~2/7 runtime per cell.",
     )
     parser.add_argument(
+        "--no-monte-csv",
+        action="store_true",
+        help="Skip writing per-algorithm monte_carlo_*.csv files to outputs/ (full factorial writes many).",
+    )
+    parser.add_argument(
         "--ablation",
         action="store_true",
         help="Run appendix ablation study only (urban_canyon / clear / critical); then exit.",
@@ -730,4 +767,5 @@ if __name__ == "__main__":
         n_trials=args.n_trials,
         duration_s=args.duration_s,
         slim_baselines=args.slim_baselines,
+        save_monte_carlo_csv=not args.no_monte_csv,
     )

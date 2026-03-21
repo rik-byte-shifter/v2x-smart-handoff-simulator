@@ -21,6 +21,15 @@ class SimConfig:
     # Statistical reporting: bootstrap resamples for pairwise effect CIs in ``plotting_utils``.
     # Use 9999 for publication-grade stability; 1999 is a practical default for large factorial grids.
     bootstrap_n_resamples: int = 1999
+    # ``compare_algorithms --quick`` uses this for ``run_statistical_tests`` / targeted bootstrap CIs.
+    bootstrap_n_resamples_quick: int = 999
+
+    # Factorial / batch runs: drop per-frame series from each trial dict after scalars are computed
+    # (avoids MemoryError when ``all_results`` holds thousands of long trajectories).
+    monte_carlo_store_trial_timeseries: bool = False
+    # If True, ``MonteCarloEvaluator.run_monte_carlo`` appends each summary dict to ``results_history``
+    # (can grow large during full factorial). Default False: history unused by comparison scripts.
+    monte_carlo_record_evaluator_history: bool = False
 
 
 CONFIG = SimConfig()

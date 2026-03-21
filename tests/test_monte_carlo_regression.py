@@ -33,6 +33,7 @@ def test_compute_external_aoi_monotone(evaluator: MonteCarloEvaluator) -> None:
         scenario="urban_canyon",
         weather_mode="clear",
         packet_profile="critical",
+        store_timeseries=True,
     )
     ext = compute_external_aoi(r)
     assert math.isfinite(ext)

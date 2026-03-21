@@ -16,6 +16,8 @@ Our evaluation uses a geometric 2D channel model with log-distance path loss, bi
 
 **Optional extra sentence:** The implementation is discrete-time, with hysteresis and time-to-trigger–style handoffs; the proposed policy adds short-horizon predicted RSS and a connectivity-survival-style heuristic (see `src/main.py`).
 
+**Discrete-time handoff timer:** Hold-time and TTT-style conditions are evaluated once per simulation frame. With a fixed headless step `dt = 1/FPS`, effective dwell time is quantized to multiples of `dt`; interactive mode may use variable `dt`, so realized hold intervals approximate the configured seconds. Towers are static per scenario, so mid-evaluation tower removal is not modeled.
+
 **Fading (GUI vs batch):** The interactive simulator defaults to **no** small-scale fading (`config.enable_small_scale_fading`); Monte Carlo / factorial evaluation defaults to **on** (`monte_carlo_enable_small_scale_fading` in `config.py`). Report both defaults in the methods section.
 
 ---

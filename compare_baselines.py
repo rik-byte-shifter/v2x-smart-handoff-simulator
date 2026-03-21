@@ -5,6 +5,9 @@ from typing import Dict, List
 from monte_carlo_runner import MonteCarloEvaluator
 from plotting_utils import plot_boxplot_comparison, plot_cdf_comparison, plot_time_series_example
 
+# Per-frame series for plot_time_series_example(...); set False to save memory on long runs.
+_STORE_TS = True
+
 
 def compare_algorithms(
     scenario: str = "urban_canyon",
@@ -42,6 +45,7 @@ def compare_algorithms(
             algorithm=algorithm_key,
             base_seed=42,
             debug_mode=False,
+            store_trial_timeseries=_STORE_TS,
         )
         result["algorithm"] = display_name
         result["algorithm_key"] = algorithm_key

@@ -154,6 +154,11 @@ def plot_time_series_example(result: Dict, output_path: str, n_samples: int = 10
     fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
 
     trial = result["all_results"][0]
+    if not trial.get("aoi_values"):
+        raise ValueError(
+            "Trial dict has no per-frame series (compact Monte Carlo mode). "
+            "Re-run with store_trial_timeseries=True or set CONFIG.monte_carlo_store_trial_timeseries=True."
+        )
     t = np.arange(len(trial["aoi_values"])) / 60.0
     t = t[:n_samples]
 
@@ -352,6 +357,7 @@ def test_proposed_vs_a3(
     trajectory_pattern: Optional[str] = None,
     weather_mode: Optional[str] = None,
     packet_profile: Optional[str] = None,
+    bootstrap_n_resamples: Optional[int] = None,
 ) -> Dict:
     """
     Pre-specified contrast: **Proposed** (``my_algorithm``) vs **A3** (``a3``) only.
@@ -410,8 +416,13 @@ def test_proposed_vs_a3(
             "cohens_d": float("nan"),
         }
 
+    br = (
+        bootstrap_n_resamples
+        if bootstrap_n_resamples is not None
+        else CONFIG.bootstrap_n_resamples
+    )
     mean_diff = float(np.mean(proposed_data) - np.mean(a3_data))
-    boot_lo, boot_hi = _bootstrap_mean_diff_ci(proposed_data, a3_data)
+    boot_lo, boot_hi = _bootstrap_mean_diff_ci(proposed_data, a3_data, n_resamples=br)
     hl_md = _hodges_lehmann_median_diff(proposed_data, a3_data)
 
     pooled_std = np.sqrt((np.std(proposed_data) ** 2 + np.std(a3_data) ** 2) / 2)
@@ -426,7 +437,9 @@ def test_proposed_vs_a3(
             test_stat, p_value = 0.0, 1.0
         if not np.isfinite(test_stat) or not np.isfinite(p_value):
             test_stat, p_value = 0.0, 1.0
-        eff_est, eff_lo, eff_hi = _bootstrap_hodges_lehmann_ci(proposed_data, a3_data)
+        eff_est, eff_lo, eff_hi = _bootstrap_hodges_lehmann_ci(
+            proposed_data, a3_data, n_resamples=br
+        )
         effect_label = "Hodges-Lehmann median diff (bootstrap 95% CI)"
     else:
         test_type = "welch_t"
@@ -466,6 +479,7 @@ def run_targeted_proposed_vs_a3_all_cells(
     results_list: List[Dict],
     metrics: Optional[List[str]] = None,
     output_path: str = "outputs/targeted_proposed_vs_a3_tests.csv",
+    bootstrap_n_resamples: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     For every (scenario, weather, profile) cell present in ``results_list``, run
@@ -502,6 +516,7 @@ def run_targeted_proposed_vs_a3_all_cells(
                 trajectory_pattern=None,
                 weather_mode=w,
                 packet_profile=p,
+                bootstrap_n_resamples=bootstrap_n_resamples,
             )
             rows.append(row)
 
@@ -516,6 +531,7 @@ def run_statistical_tests(
     results_list: List[Dict],
     output_path: str,
     primary_output_path: Optional[str] = None,
+    bootstrap_n_resamples: Optional[int] = None,
 ):
     """
     Pairwise comparisons: Mann–Whitney U for count metrics (skewed/discrete),
@@ -529,7 +545,15 @@ def run_statistical_tests(
 
     If ``primary_output_path`` is set, a second CSV is written containing only rows
     whose metric is in ``PRIMARY_STATISTICAL_METRICS`` (external AoI + churn + outage).
+
+    ``bootstrap_n_resamples``: override ``CONFIG.bootstrap_n_resamples`` (e.g. lower count
+    for ``compare_algorithms --quick`` to shorten wall-clock).
     """
+    br = (
+        bootstrap_n_resamples
+        if bootstrap_n_resamples is not None
+        else CONFIG.bootstrap_n_resamples
+    )
     metrics = [
         "avg_aoi_external",
         "peak_aoi_external",
@@ -591,7 +615,7 @@ def run_statistical_tests(
                         continue
 
                     mean_diff = float(np.mean(data1) - np.mean(data2))
-                    boot_lo, boot_hi = _bootstrap_mean_diff_ci(data1, data2)
+                    boot_lo, boot_hi = _bootstrap_mean_diff_ci(data1, data2, n_resamples=br)
 
                     if len(data1) < 2 or len(data2) < 2:
                         test_stat, p_value = 0.0, 1.0
@@ -621,7 +645,7 @@ def run_statistical_tests(
                         if not np.isfinite(test_stat) or not np.isfinite(p_value):
                             test_stat, p_value = 0.0, 1.0
                         eff_est, eff_lo, eff_hi = _bootstrap_hodges_lehmann_ci(
-                            data1, data2
+                            data1, data2, n_resamples=br
                         )
                         effect_label = "Hodges-Lehmann median diff (bootstrap 95% CI)"
                     else:

@@ -82,6 +82,21 @@ from main import (
 )
 
 
+def _strip_trial_timeseries(trial: Dict) -> None:
+    """
+    Remove per-frame lists from a trial dict after scalar metrics (incl. external AoI) are set.
+    Keeps factorial / Monte Carlo memory bounded; see CONFIG.monte_carlo_store_trial_timeseries.
+    """
+    for k in (
+        "aoi_values",
+        "rss_values",
+        "connected_rss_trace",
+        "handoff_events",
+        "connected_towers",
+    ):
+        trial.pop(k, None)
+
+
 def _telemetry_rows_for_external_aoi(trial_results: Dict) -> List[Dict[str, float]]:
     """Build (t, connected_rss) rows; prefer serving RSS trace (relay-safe)."""
     trace = trial_results.get("connected_rss_trace")
@@ -452,13 +467,15 @@ class MonteCarloEvaluator:
         packet_profile: Optional[str] = None,
         sim: Optional[V2XSmartHandoffSimulator] = None,
         policy_weight_override: Optional[Dict[str, float]] = None,
+        store_timeseries: Optional[bool] = None,
     ) -> Dict:
         """
         Run one complete simulation trial.
 
         Returns dict with metrics:
         - avg_aoi, peak_aoi, handoff_count, ping_pong_count, outage_time
-        - time_series data for plotting
+        - Per-frame lists (``aoi_values``, ``rss_values``, …) only when
+          ``store_timeseries`` or ``CONFIG.monte_carlo_store_trial_timeseries`` is True.
         """
         algorithm_key = self._normalize_algorithm(algorithm)
         self._validate_algorithm(algorithm_key)
@@ -605,6 +622,10 @@ class MonteCarloEvaluator:
         }
         trial_out["avg_aoi_external"] = compute_external_aoi(trial_out)
         trial_out["peak_aoi_external"] = compute_external_aoi_peak(trial_out)
+        if store_timeseries is None:
+            store_timeseries = CONFIG.monte_carlo_store_trial_timeseries
+        if not store_timeseries:
+            _strip_trial_timeseries(trial_out)
         return trial_out
 
     def _validate_algorithm(self, algorithm_key: str) -> None:
@@ -751,11 +772,17 @@ class MonteCarloEvaluator:
         weather_mode: Optional[str] = None,
         packet_profile: Optional[str] = None,
         policy_weight_override: Optional[Dict[str, float]] = None,
+        sim: Optional[V2XSmartHandoffSimulator] = None,
+        pygame_cleanup: Optional[bool] = None,
+        store_trial_timeseries: Optional[bool] = None,
     ) -> Dict:
         """
         Run Monte Carlo simulation with n_trials.
 
         Returns aggregated statistics with confidence intervals.
+
+        Pass a shared ``sim`` and ``pygame_cleanup=False`` to run multiple algorithms per
+        process without re-initializing pygame between batches (see ``compare_algorithms``).
         """
         from scipy import stats
 
@@ -774,7 +801,12 @@ class MonteCarloEvaluator:
 
         import pygame
 
-        sim = V2XSmartHandoffSimulator(headless=CONFIG.headless_monte_carlo)
+        created_sim = sim is None
+        if created_sim:
+            sim = V2XSmartHandoffSimulator(headless=CONFIG.headless_monte_carlo)
+        if pygame_cleanup is None:
+            pygame_cleanup = created_sim
+        sim.enable_small_scale_fading_override = CONFIG.monte_carlo_enable_small_scale_fading
         try:
             for i in range(n_trials):
                 seed = base_seed + i if base_seed is not None else None
@@ -790,13 +822,15 @@ class MonteCarloEvaluator:
                     packet_profile=packet_profile,
                     sim=sim,
                     policy_weight_override=policy_weight_override,
+                    store_timeseries=store_trial_timeseries,
                 )
                 all_results.append(result)
 
                 if (i + 1) % 10 == 0:
                     print(f"  Completed {i + 1}/{n_trials} trials...")
         finally:
-            pygame.quit()
+            if pygame_cleanup:
+                pygame.quit()
 
         avg_aoi_values = [r["avg_aoi"] for r in all_results]
         peak_aoi_values = [r["peak_aoi"] for r in all_results]
@@ -843,7 +877,8 @@ class MonteCarloEvaluator:
             stats_dict[f"{metric_name}_ci_high"] = ci[1]
 
         stats_dict["all_results"] = all_results
-        self.results_history.append(stats_dict)
+        if CONFIG.monte_carlo_record_evaluator_history:
+            self.results_history.append(stats_dict)
 
         print("\n" + "=" * 70)
         print(f"MONTE CARLO RESULTS: {algorithm} ({trajectory_pattern})")
@@ -931,6 +966,7 @@ if __name__ == "__main__":
         trajectory_pattern="random_walk",
         algorithm="my_algorithm",
         base_seed=CONFIG.monte_carlo_base_seed,
+        store_trial_timeseries=True,
     )
 
     csv_path = evaluator.save_results_to_csv(results)
