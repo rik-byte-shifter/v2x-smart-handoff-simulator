@@ -1,3 +1,0 @@
-model,samples,handoff_count,ping_pong_count,avg_connected_rss_dbm,outage_time_s
-velocity,3440,22,7,-33.206,0.0
-kalman,3440,23,8,-32.907,0.0

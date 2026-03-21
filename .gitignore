@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+
+# Simulation / evaluation artifacts (regenerate with compare_algorithms.py or src/main.py)
+outputs/**/*.csv
+outputs/**/*.png
